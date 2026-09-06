@@ -866,11 +866,15 @@ function Messenger({
                               {message.senderName}
                             </b>
                           )}
-                          <span>{message.body}</span>
-                          <time>
-                            {formatMessageTime(message.createdAt)}
+                          <span className="message-bubble__text">
+                            {message.body}
+                          </span>
+                          <div className="message-meta">
+                            <time dateTime={message.createdAt}>
+                              {formatMessageTime(message.createdAt)}
+                            </time>
                             {sent && <MessageTicks message={message} />}
-                          </time>
+                          </div>
                         </div>
                       </div>
                     </div>
