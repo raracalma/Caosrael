@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n web,api -c cyan,green \"vite --host 0.0.0.0\" \"tsx watch server/index.ts\"",
-    "build": "tsc --noEmit && vite build",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.server.json",
+    "start": "NODE_ENV=production node dist-server/index.js",
     "test": "vitest run"
   },
   "dependencies": {
@@ -31,6 +31,7 @@
     "@types/supertest": "^7.2.1",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^10.0.5",
+    "railway": "^3.11.0",
     "supertest": "^7.2.2",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",

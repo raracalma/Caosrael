@@ -4,6 +4,15 @@ MVP web de mensagens do repositório **Caosrael**. O CaosChat tem identidade
 visual própria, interface responsiva, conversas individuais e em grupo,
 mensagens em tempo real e dados persistidos localmente.
 
+## Acesso público
+
+**URL HTTPS:** pendente da primeira autenticação do projeto no Railway.
+
+O deploy está preparado para servir interface, API e WebSocket no mesmo domínio.
+O SQLite e as sessões ficam em um volume persistente de 512 MB. A URL
+`.railway.app` será registrada aqui assim que o primeiro deploy autenticado for
+concluído.
+
 ## O que já funciona
 
 - cadastro e login com nome de exibição e senha;
@@ -67,10 +76,58 @@ Para testar o modo de produção:
 
 ```bash
 npm run build
-npm start
+SESSION_SECRET="$(openssl rand -hex 32)" npm start
 ```
 
 Abra [http://localhost:3001](http://localhost:3001).
+
+## Publicar no Railway
+
+O projeto usa o arquivo `.railway/railway.ts` para declarar um serviço na região
+US East, uma única réplica e um volume persistente montado em `/data`. O
+`Dockerfile` gera os artefatos do frontend e da API em uma imagem única.
+
+### Primeiro deploy
+
+1. Faça merge deste PR em `main`.
+2. Crie uma conta em [railway.com](https://railway.com) usando GitHub e autorize
+   o Railway a acessar o repositório `raracalma/Caosrael`.
+3. Crie um projeto vazio chamado `caoschat`.
+4. Em **Project Settings → Shared Variables**, crie `SESSION_SECRET` com um
+   valor aleatório longo, por exemplo o resultado de `openssl rand -hex 32`.
+5. Instale e autentique a CLI:
+
+   ```bash
+   npm install --global @railway/cli
+   railway login
+   railway link
+   ```
+
+6. No diretório do repositório, revise e aplique a infraestrutura:
+
+   ```bash
+   railway config plan
+   railway config apply
+   railway service caoschat
+   railway domain
+   ```
+
+O último comando gera um domínio público `.railway.app` com HTTPS automático.
+Não use mais de uma réplica enquanto o app utilizar SQLite, pois o volume é
+anexado a uma única instância.
+
+### Redeploy
+
+Depois da vinculação com o GitHub, cada push em `main` gera um novo deploy. Para
+repetir manualmente o último deploy:
+
+```bash
+railway redeploy --service caoschat
+```
+
+O banco, as contas demo e as sessões sobrevivem aos redeploys porque ficam no
+volume `caoschat-data`. Para reiniciar os dados, remova
+`/data/caoschat.sqlite` pelo navegador de arquivos do volume e faça redeploy.
 
 ## Configuração
 

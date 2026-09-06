@@ -28,13 +28,24 @@ declare module "express-session" {
 }
 
 const port = Number(process.env.PORT ?? 3001);
+const isProduction = process.env.NODE_ENV === "production";
+const sessionSecret = process.env.SESSION_SECRET;
+
+if (isProduction && !sessionSecret) {
+  throw new Error("SESSION_SECRET é obrigatório em produção.");
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+if (isProduction) {
+  app.set("trust proxy", 1);
+}
+
 const sessionMiddleware = session({
   store: new SQLiteSessionStore(),
-  secret: process.env.SESSION_SECRET ?? "caoschat-dev-change-in-production",
+  secret: sessionSecret ?? "caoschat-dev-only",
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -340,7 +351,7 @@ app.use(
   },
 );
 
-if (process.env.NODE_ENV === "production") {
+if (isProduction) {
   const distDirectory = path.join(process.cwd(), "dist");
   app.use(express.static(distDirectory));
   app.use((req, res, next) => {

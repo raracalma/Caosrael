@@ -4,7 +4,10 @@ import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 
-const dataDirectory = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
+const dataDirectory =
+  process.env.DATA_DIR ??
+  process.env.RAILWAY_VOLUME_MOUNT_PATH ??
+  path.join(process.cwd(), "data");
 fs.mkdirSync(dataDirectory, { recursive: true });
 
 export const db = new Database(path.join(dataDirectory, "caoschat.sqlite"));
