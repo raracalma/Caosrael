@@ -4,6 +4,8 @@ import express, { type NextFunction, type Request, type Response } from "express
 import session from "express-session";
 import { Server } from "socket.io";
 import { z } from "zod";
+import { dataDirectory } from "./db.js";
+import { parsePort, resolveSessionSecret } from "./runtime.js";
 import { SQLiteSessionStore } from "./session-store.js";
 import {
   authenticate,
@@ -27,13 +29,18 @@ declare module "express-session" {
   }
 }
 
-const port = Number(process.env.PORT ?? 3001);
 const isProduction = process.env.NODE_ENV === "production";
-const sessionSecret = process.env.SESSION_SECRET;
-
-if (isProduction && !sessionSecret) {
-  throw new Error("SESSION_SECRET é obrigatório em produção.");
-}
+const port = parsePort(process.env.PORT);
+const host = process.env.HOST?.trim() || "0.0.0.0";
+const sessionSecret = resolveSessionSecret({
+  dataDirectory,
+  isProduction,
+  providedSecret: process.env.SESSION_SECRET,
+});
+const secureCookies =
+  process.env.COOKIE_SECURE === undefined
+    ? isProduction
+    : process.env.COOKIE_SECURE === "true";
 
 const app = express();
 const server = http.createServer(app);
@@ -51,7 +58,7 @@ const sessionMiddleware = session({
   cookie: {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.COOKIE_SECURE === "true",
+    secure: secureCookies,
     maxAge: 30 * 24 * 60 * 60 * 1_000,
   },
 });
@@ -363,6 +370,7 @@ if (isProduction) {
   });
 }
 
-server.listen(port, () => {
-  console.log(`CaosChat API disponível em http://localhost:${port}`);
+server.listen(port, host, () => {
+  console.log(`CaosChat API ouvindo em http://${host}:${port}`);
+  console.log(`SQLite disponível em ${dataDirectory}`);
 });

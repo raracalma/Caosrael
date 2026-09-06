@@ -6,7 +6,8 @@ mensagens em tempo real e dados persistidos localmente.
 
 ## Acesso público
 
-**URL HTTPS:** pendente da primeira autenticação do projeto no Railway.
+**URL HTTPS:** use o domínio público exibido em **Networking** no serviço
+Railway. Ele ainda não foi registrado neste README.
 
 O deploy está preparado para servir interface, API e WebSocket no mesmo domínio.
 O SQLite e as sessões ficam em um volume persistente de 512 MB. A URL
@@ -27,7 +28,7 @@ concluído.
 
 ## Requisitos
 
-- Node.js 20 ou mais recente;
+- Node.js 22.12 ou mais recente;
 - npm 10 ou mais recente.
 
 ## Rodar localmente
@@ -76,7 +77,7 @@ Para testar o modo de produção:
 
 ```bash
 npm run build
-SESSION_SECRET="$(openssl rand -hex 32)" npm start
+COOKIE_SECURE=false npm start
 ```
 
 Abra [http://localhost:3001](http://localhost:3001).
@@ -89,13 +90,14 @@ US East, uma única réplica e um volume persistente montado em `/data`. O
 
 ### Primeiro deploy
 
-1. Faça merge deste PR em `main`.
-2. Crie uma conta em [railway.com](https://railway.com) usando GitHub e autorize
+1. Crie uma conta em [railway.com](https://railway.com) usando GitHub e autorize
    o Railway a acessar o repositório `raracalma/Caosrael`.
-3. Crie um projeto vazio chamado `caoschat`.
-4. Em **Project Settings → Shared Variables**, crie `SESSION_SECRET` com um
-   valor aleatório longo, por exemplo o resultado de `openssl rand -hex 32`.
-5. Instale e autentique a CLI:
+2. Crie um projeto vazio chamado `caoschat`.
+3. Em **Project Settings → Shared Variables**, é recomendado criar
+   `SESSION_SECRET` com um valor aleatório longo, por exemplo o resultado de
+   `openssl rand -hex 32`. Sem a variável, o app cria um segredo seguro no
+   volume e continua iniciando.
+4. Instale e autentique a CLI:
 
    ```bash
    npm install --global @railway/cli
@@ -103,7 +105,7 @@ US East, uma única réplica e um volume persistente montado em `/data`. O
    railway link
    ```
 
-6. No diretório do repositório, revise e aplique a infraestrutura:
+5. No diretório do repositório, revise e aplique a infraestrutura:
 
    ```bash
    railway config plan
@@ -129,19 +131,37 @@ O banco, as contas demo e as sessões sobrevivem aos redeploys porque ficam no
 volume `caoschat-data`. Para reiniciar os dados, remova
 `/data/caoschat.sqlite` pelo navegador de arquivos do volume e faça redeploy.
 
+### Conferência do serviço
+
+Se o serviço foi criado diretamente pelo botão **Deploy from GitHub** sem
+aplicar `.railway/railway.ts`, confira:
+
+- **Source:** branch `main`;
+- **Builder:** Dockerfile; deixe Build Command e Start Command vazios. Se
+  precisar definir Start Command manualmente, use
+  `node dist-server/index.js`;
+- **Networking:** gere um domínio público; o Railway fornece HTTPS e suporta o
+  WebSocket do Socket.IO no mesmo domínio;
+- **Healthcheck Path:** `/api/health`;
+- **Volume:** anexe um volume ao serviço com mount path `/data`;
+- **Replicas:** mantenha `1` enquanto usar SQLite.
+
 ## Configuração
 
 Variáveis opcionais:
 
 | Variável | Padrão | Uso |
 | --- | --- | --- |
-| `PORT` | `3001` | porta da API e do servidor de produção |
-| `SESSION_SECRET` | valor local de desenvolvimento | segredo de assinatura da sessão |
+| `PORT` | `3001` | fornecida automaticamente pelo Railway; não defina manualmente |
+| `HOST` | `0.0.0.0` | interface de rede em que a API escuta |
+| `SESSION_SECRET` | segredo aleatório salvo no diretório de dados | recomendado para assinatura estável da sessão |
 | `DATA_DIR` | `./data` | diretório dos bancos SQLite |
-| `COOKIE_SECURE` | `false` | defina como `true` ao publicar somente em HTTPS |
+| `COOKIE_SECURE` | `true` em produção | use `false` apenas em HTTP local |
 | `DISABLE_DEMO_SEED` | `false` | desativa a criação das contas e conversas demo |
 
-Em produção, use um `SESSION_SECRET` longo e aleatório.
+No Railway, use `DATA_DIR=/data`, `HOST=0.0.0.0` e, de preferência, um
+`SESSION_SECRET` longo e aleatório. Não crie uma variável `PORT`: o Railway
+injeta a porta correta em cada execução.
 
 ## Estrutura
 

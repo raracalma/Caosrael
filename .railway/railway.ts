@@ -6,7 +6,7 @@ import {
   volume,
 } from "railway/iac";
 
-export default defineRailway((context) => {
+export default defineRailway(() => {
   const data = volume("caoschat-data", {
     region: "us-east4-eqdc4a",
     sizeMB: 512,
@@ -24,8 +24,8 @@ export default defineRailway((context) => {
     env: {
       NODE_ENV: "production",
       COOKIE_SECURE: "true",
+      HOST: "0.0.0.0",
       DATA_DIR: "/data",
-      SESSION_SECRET: context.shared.SESSION_SECRET,
     },
   });
 
