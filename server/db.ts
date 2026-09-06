@@ -4,11 +4,20 @@ import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 
-const dataDirectory =
+export const dataDirectory =
   process.env.DATA_DIR ??
   process.env.RAILWAY_VOLUME_MOUNT_PATH ??
   path.join(process.cwd(), "data");
-fs.mkdirSync(dataDirectory, { recursive: true });
+
+try {
+  fs.mkdirSync(dataDirectory, { recursive: true });
+  fs.accessSync(dataDirectory, fs.constants.R_OK | fs.constants.W_OK);
+} catch (error) {
+  throw new Error(
+    `O diretório SQLite "${dataDirectory}" não existe ou não permite leitura e escrita. Verifique DATA_DIR e o volume do Railway.`,
+    { cause: error },
+  );
+}
 
 export const db = new Database(path.join(dataDirectory, "caoschat.sqlite"));
 

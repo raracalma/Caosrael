@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -56,17 +56,22 @@ async function register(displayName: string) {
 }
 
 beforeAll(async () => {
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_ENV: "production",
+    COOKIE_SECURE: "false",
+    PORT: String(port),
+    DATA_DIR: dataDirectory,
+    DISABLE_DEMO_SEED: "true",
+  };
+  delete environment.SESSION_SECRET;
+
   server = spawn(
     process.execPath,
     ["--import", "tsx", path.join(process.cwd(), "server/index.ts")],
     {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PORT: String(port),
-        DATA_DIR: dataDirectory,
-        DISABLE_DEMO_SEED: "true",
-      },
+      env: environment,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -86,6 +91,8 @@ afterAll(() => {
 
 describe("fluxo principal do CaosChat", () => {
   it("registra duas contas, cria chats e entrega mensagem em tempo real", async () => {
+    expect(existsSync(path.join(dataDirectory, ".session-secret"))).toBe(true);
+
     const ana = await register("Ana Teste");
     const bia = await register("Bia Teste");
 
