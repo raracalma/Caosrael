@@ -56,7 +56,7 @@ async function register(displayName: string) {
 }
 
 beforeAll(async () => {
-  const environment = {
+  const environment: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: "production",
     COOKIE_SECURE: "false",
