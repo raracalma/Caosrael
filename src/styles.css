@@ -1577,6 +1577,19 @@ a {
   align-self: flex-end;
 }
 
+.profile-success {
+  padding: 10px 12px;
+  border: 1px solid #bde1cf;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #28775e;
+  background: #effaf4;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .profile-about > span {
   color: #6b8c82;
   font-size: 10px;

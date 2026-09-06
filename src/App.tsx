@@ -579,6 +579,7 @@ function ProfileScreen({
   const [banner, setBanner] = useState<File>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
   const avatarPreview = useMemo(
     () => (avatar ? URL.createObjectURL(avatar) : user.avatarUrl),
     [avatar, user.avatarUrl],
@@ -601,6 +602,7 @@ function ProfileScreen({
     event.preventDefault();
     setBusy(true);
     setError("");
+    setSaved(false);
     try {
       let updated = (
         await api.updateProfile(displayName.trim(), bio.trim())
@@ -609,6 +611,9 @@ function ProfileScreen({
         updated = (await api.uploadProfileMedia(avatar, banner)).user;
       }
       onSaved(updated);
+      setAvatar(undefined);
+      setBanner(undefined);
+      setSaved(true);
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : "Não foi possível salvar.",
@@ -709,6 +714,11 @@ function ProfileScreen({
               </label>
             </div>
             {error && <div className="form-error">{error}</div>}
+            {saved && (
+              <div className="profile-success">
+                <Check size={16} /> Perfil atualizado.
+              </div>
+            )}
             <button className="button button--primary" disabled={busy}>
               {busy ? "Salvando…" : "Salvar perfil"}
             </button>

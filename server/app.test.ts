@@ -137,6 +137,11 @@ describe("fluxo principal do CaosChat", () => {
       new Blob([onePixelPng], { type: "image/png" }),
       "avatar.png",
     );
+    profileMedia.append(
+      "banner",
+      new Blob([onePixelPng], { type: "image/png" }),
+      "banner.png",
+    );
     const mediaResponse = await fetch(`${baseUrl}/api/profile/media`, {
       method: "POST",
       headers: { Cookie: ana.cookie },
@@ -144,10 +149,19 @@ describe("fluxo principal do CaosChat", () => {
     });
     expect(mediaResponse.status).toBe(200);
     const mediaUser = (await mediaResponse.json()) as {
-      user: { avatarUrl: string; avatarMediaType: string };
+      user: {
+        avatarUrl: string;
+        avatarMediaType: string;
+        bannerUrl: string;
+        bannerMediaType: string;
+      };
     };
-    expect(mediaUser.user).toMatchObject({ avatarMediaType: "image/png" });
+    expect(mediaUser.user).toMatchObject({
+      avatarMediaType: "image/png",
+      bannerMediaType: "image/png",
+    });
     expect(mediaUser.user.avatarUrl).toMatch(/^\/uploads\/avatar-/);
+    expect(mediaUser.user.bannerUrl).toMatch(/^\/uploads\/banner-/);
     expect(
       (
         await fetch(`${baseUrl}${mediaUser.user.avatarUrl}`, {
