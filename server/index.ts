@@ -2,9 +2,12 @@ import path from "node:path";
 import http from "node:http";
 import express, { type NextFunction, type Request, type Response } from "express";
 import session from "express-session";
+import multer from "multer";
 import { Server } from "socket.io";
 import { z } from "zod";
 import { dataDirectory } from "./db.js";
+import { PresenceRegistry } from "./presence.js";
+import { type PresenceState } from "./presence-types.js";
 import { parsePort, resolveSessionSecret } from "./runtime.js";
 import { SQLiteSessionStore } from "./session-store.js";
 import {
@@ -16,6 +19,9 @@ import {
   findUserById,
   getChat,
   getChatMemberIds,
+  getContactUserIds,
+  getPublicUser,
+  isChatMember,
   listChats,
   listMessages,
   listUsers,
@@ -24,8 +30,16 @@ import {
   markMessageDelivered,
   markPendingMessagesDelivered,
   setLastSeen,
+  updateProfile,
+  updateProfileMedia,
   type ReceiptUpdate,
 } from "./store.js";
+import {
+  InvalidMediaError,
+  persistMedia,
+  removeStoredMedia,
+  uploadsDirectory,
+} from "./uploads.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -69,10 +83,27 @@ const sessionMiddleware = session({
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "32kb" }));
+app.use(
+  "/uploads",
+  express.static(uploadsDirectory, {
+    immutable: true,
+    maxAge: "30d",
+    setHeaders(response) {
+      response.setHeader("X-Content-Type-Options", "nosniff");
+    },
+  }),
+);
 app.use(sessionMiddleware);
 
-const onlineConnections = new Map<string, number>();
-const onlineIds = () => new Set(onlineConnections.keys());
+const presenceRegistry = new PresenceRegistry();
+const presenceLookup = () => presenceRegistry.toLookup();
+const mediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 2,
+    fileSize: 12 * 1024 * 1024,
+  },
+});
 
 type AuthedRequest = Request & {
   session: session.Session & Partial<session.SessionData>;
@@ -95,16 +126,6 @@ function routeParam(req: Request, name: string) {
   return Array.isArray(value) ? (value[0] ?? "") : value;
 }
 
-function publicCurrentUser(userId: string) {
-  const user = findUserById(userId)!;
-  return {
-    id: user.id,
-    displayName: user.display_name,
-    lastSeenAt: user.last_seen_at,
-    online: onlineConnections.has(user.id),
-  };
-}
-
 function emitChatRefresh(memberIds: string[]) {
   memberIds.forEach((memberId) => {
     io.to(`user:${memberId}`).emit("chats:refresh");
@@ -115,6 +136,27 @@ function emitReceiptUpdates(updates: ReceiptUpdate[]) {
   updates.forEach((update) => {
     io.to(`user:${update.senderId}`).emit("receipt:updated", update);
   });
+}
+
+function emitPresence(userId: string) {
+  const snapshot = presenceRegistry.get(userId);
+  const recipientIds = new Set([userId, ...getContactUserIds(userId)]);
+  recipientIds.forEach((recipientId) => {
+    io.to(`user:${recipientId}`).emit("presence:changed", {
+      userId,
+      ...snapshot,
+    });
+  });
+}
+
+function emitProfileUpdate(userId: string) {
+  const user = getPublicUser(userId, presenceLookup());
+  if (!user) return;
+  const recipientIds = new Set([userId, ...getContactUserIds(userId)]);
+  recipientIds.forEach((recipientId) => {
+    io.to(`user:${recipientId}`).emit("profile:updated", user);
+  });
+  emitChatRefresh([...recipientIds]);
 }
 
 const credentialsSchema = z.object({
@@ -182,16 +224,118 @@ app.post("/api/auth/logout", requireAuth, (req, res, next) => {
 });
 
 app.get("/api/auth/me", requireAuth, (req, res) => {
-  res.json({ user: publicCurrentUser(currentUserId(req)) });
+  res.json({ user: getPublicUser(currentUserId(req), presenceLookup()) });
 });
 
 app.get("/api/users", requireAuth, (req, res) => {
-  res.json({ users: listUsers(currentUserId(req), onlineIds()) });
+  res.json({ users: listUsers(currentUserId(req), presenceLookup()) });
 });
 
 app.get("/api/chats", requireAuth, (req, res) => {
-  res.json({ chats: listChats(currentUserId(req), onlineIds()) });
+  res.json({ chats: listChats(currentUserId(req), presenceLookup()) });
 });
+
+const profileSchema = z.object({
+  displayName: z.string().trim().min(2).max(40),
+  bio: z.string().trim().max(300),
+});
+
+app.get("/api/users/:userId/profile", requireAuth, (req, res) => {
+  const user = getPublicUser(routeParam(req, "userId"), presenceLookup());
+  if (!user) {
+    res.status(404).json({ error: "Perfil não encontrado." });
+    return;
+  }
+  res.json({ user });
+});
+
+app.patch("/api/profile", requireAuth, (req, res) => {
+  const parsed = profileSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Use um nome de 2 a 40 caracteres e uma bio de até 300.",
+    });
+    return;
+  }
+  try {
+    updateProfile(
+      currentUserId(req),
+      parsed.data.displayName,
+      parsed.data.bio,
+    );
+    emitProfileUpdate(currentUserId(req));
+    res.json({
+      user: getPublicUser(currentUserId(req), presenceLookup()),
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("UNIQUE constraint failed")
+    ) {
+      res.status(409).json({ error: "Este nome já está em uso." });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.post(
+  "/api/profile/media",
+  requireAuth,
+  mediaUpload.fields([
+    { name: "avatar", maxCount: 1 },
+    { name: "banner", maxCount: 1 },
+  ]),
+  async (req, res, next) => {
+    const files = req.files as
+      | {
+          avatar?: Express.Multer.File[];
+          banner?: Express.Multer.File[];
+        }
+      | undefined;
+    const avatarFile = files?.avatar?.[0];
+    const bannerFile = files?.banner?.[0];
+    if (!avatarFile && !bannerFile) {
+      res.status(400).json({ error: "Escolha uma foto, GIF, vídeo ou banner." });
+      return;
+    }
+
+    const userId = currentUserId(req);
+    const oldUser = findUserById(userId)!;
+    let avatar: Awaited<ReturnType<typeof persistMedia>> | undefined;
+    let banner: Awaited<ReturnType<typeof persistMedia>> | undefined;
+    try {
+      if (avatarFile) avatar = await persistMedia(avatarFile, "avatar");
+      if (bannerFile) banner = await persistMedia(bannerFile, "banner");
+      updateProfileMedia(userId, {
+        ...(avatar && {
+          avatarPath: avatar.url,
+          avatarMediaType: avatar.mediaType,
+        }),
+        ...(banner && {
+          bannerPath: banner.url,
+          bannerMediaType: banner.mediaType,
+        }),
+      });
+      await Promise.all([
+        avatar ? removeStoredMedia(oldUser.avatar_path) : undefined,
+        banner ? removeStoredMedia(oldUser.banner_path) : undefined,
+      ]);
+      emitProfileUpdate(userId);
+      res.json({ user: getPublicUser(userId, presenceLookup()) });
+    } catch (error) {
+      await Promise.all([
+        avatar ? removeStoredMedia(avatar.url) : undefined,
+        banner ? removeStoredMedia(banner.url) : undefined,
+      ]);
+      if (error instanceof InvalidMediaError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      next(error);
+    }
+  },
+);
 
 app.post("/api/chats/direct", requireAuth, (req, res) => {
   const parsed = z.object({ userId: z.string().uuid() }).safeParse(req.body);
@@ -202,7 +346,7 @@ app.post("/api/chats/direct", requireAuth, (req, res) => {
   const chat = createDirectChat(
     currentUserId(req),
     parsed.data.userId,
-    onlineIds(),
+    presenceLookup(),
   );
   if (!chat) {
     res.status(400).json({ error: "Não foi possível criar esta conversa." });
@@ -229,7 +373,7 @@ app.post("/api/chats/group", requireAuth, (req, res) => {
     currentUserId(req),
     parsed.data.name,
     parsed.data.memberIds,
-    onlineIds(),
+    presenceLookup(),
   );
   if (!chat) {
     res.status(400).json({ error: "O grupo precisa de participantes válidos." });
@@ -295,7 +439,7 @@ app.get("/api/chats/:chatId", requireAuth, (req, res) => {
   const chat = getChat(
     routeParam(req, "chatId"),
     currentUserId(req),
-    onlineIds(),
+    presenceLookup(),
   );
   if (!chat) {
     res.status(404).json({ error: "Conversa não encontrada." });
@@ -317,9 +461,49 @@ io.on("connection", (socket) => {
   }
 
   socket.join(`user:${userId}`);
-  onlineConnections.set(userId, (onlineConnections.get(userId) ?? 0) + 1);
+  presenceRegistry.connect(socket.id, userId);
   setLastSeen(userId);
-  io.emit("presence:update", { userId, online: true });
+  emitPresence(userId);
+
+  socket.on(
+    "presence:report",
+    (
+      payload: {
+        state?: PresenceState;
+        chatId?: string;
+      },
+      acknowledge?: (result: {
+        ok: boolean;
+        state: PresenceState;
+        chatId: string | null;
+      }) => void,
+    ) => {
+      const parsed = z
+        .object({
+          state: z.enum(["in_chat", "app", "away"]),
+          chatId: z.string().uuid().optional(),
+        })
+        .safeParse(payload);
+      if (!parsed.success) {
+        acknowledge?.({ ok: false, state: "away", chatId: null });
+        return;
+      }
+      const canEnterChat =
+        parsed.data.state === "in_chat" &&
+        parsed.data.chatId &&
+        isChatMember(parsed.data.chatId, userId);
+      const state: PresenceState =
+        parsed.data.state === "in_chat" && !canEnterChat
+          ? "app"
+          : parsed.data.state;
+      const chatId =
+        state === "in_chat" ? (parsed.data.chatId ?? null) : null;
+      presenceRegistry.report(socket.id, state, chatId);
+      if (state === "away") setLastSeen(userId);
+      emitPresence(userId);
+      acknowledge?.({ ok: true, state, chatId });
+    },
+  );
 
   socket.on(
     "message:send",
@@ -390,20 +574,31 @@ io.on("connection", (socket) => {
   );
 
   socket.on("disconnect", () => {
-    const remaining = (onlineConnections.get(userId) ?? 1) - 1;
-    if (remaining <= 0) {
-      onlineConnections.delete(userId);
-      const lastSeenAt = new Date().toISOString();
-      setLastSeen(userId, lastSeenAt);
-      io.emit("presence:update", { userId, online: false, lastSeenAt });
-    } else {
-      onlineConnections.set(userId, remaining);
-    }
+    presenceRegistry.disconnect(socket.id);
+    if (presenceRegistry.get(userId).state === "away") setLastSeen(userId);
+    emitPresence(userId);
   });
 });
 
+const presenceSweep = setInterval(() => {
+  presenceRegistry.expireInactive(40_000).forEach((userId) => {
+    if (presenceRegistry.get(userId).state === "away") setLastSeen(userId);
+    emitPresence(userId);
+  });
+}, 10_000);
+presenceSweep.unref();
+
 app.use(
   (error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (error instanceof multer.MulterError) {
+      res.status(400).json({
+        error:
+          error.code === "LIMIT_FILE_SIZE"
+            ? "O arquivo excede o limite de 12 MB."
+            : "Não foi possível receber este arquivo.",
+      });
+      return;
+    }
     console.error(error);
     res.status(500).json({ error: "Algo saiu do ritmo. Tente novamente." });
   },

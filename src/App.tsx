@@ -1,9 +1,11 @@
 import {
   ArrowLeft,
+  Camera,
   Check,
   CheckCheck,
   ChevronRight,
   LogOut,
+  Image as ImageIcon,
   MessageCircleMore,
   MessagesSquare,
   Plus,
@@ -38,21 +40,79 @@ function colorFor(value: string) {
 
 function Avatar({
   name,
-  online,
+  avatarUrl,
+  avatarMediaType,
+  presence,
   group,
   size = "medium",
 }: {
   name: string;
-  online?: boolean;
+  avatarUrl?: string | null;
+  avatarMediaType?: string | null;
+  presence?: "in_chat" | "app" | "away";
   group?: boolean;
   size?: "small" | "medium" | "large";
 }) {
   return (
     <div className={`avatar avatar--${size} avatar--${colorFor(name)}`}>
-      {group ? <Users size={size === "large" ? 24 : 19} /> : initials(name)}
-      {online && <span className="avatar__online" aria-label="online" />}
+      {avatarUrl ? (
+        avatarMediaType?.startsWith("video/") ? (
+          <video src={avatarUrl} autoPlay loop muted playsInline />
+        ) : (
+          <img src={avatarUrl} alt="" />
+        )
+      ) : group ? (
+        <Users size={size === "large" ? 24 : 19} />
+      ) : (
+        initials(name)
+      )}
+      {presence && (
+        <span
+          className={`avatar__presence avatar__presence--${presence}`}
+          aria-label={
+            presence === "in_chat"
+              ? "nesta conversa"
+              : presence === "app"
+                ? "no aplicativo"
+                : "ausente"
+          }
+        />
+      )}
     </div>
   );
+}
+
+function userPresenceForChat(
+  user: User | undefined,
+  chatId?: string,
+): "in_chat" | "app" | "away" {
+  if (!user || user.presenceState === "away") return "away";
+  if (
+    chatId &&
+    user.presenceState === "in_chat" &&
+    user.activeChatId === chatId
+  ) {
+    return "in_chat";
+  }
+  return "app";
+}
+
+function chatPresence(
+  chat: Chat,
+  currentUserId: string,
+): "in_chat" | "app" | "away" {
+  const others = chat.members.filter((member) => member.id !== currentUserId);
+  if (
+    others.some(
+      (member) =>
+        member.presenceState === "in_chat" &&
+        member.activeChatId === chat.id,
+    )
+  ) {
+    return "in_chat";
+  }
+  if (others.some((member) => member.presenceState !== "away")) return "app";
+  return "away";
 }
 
 function Logo({ compact = false }: { compact?: boolean }) {
@@ -306,11 +366,22 @@ function formatDay(value: string) {
 
 function presenceText(chat: Chat, currentUserId: string) {
   if (chat.type === "group") {
-    return `${chat.members.length} participantes`;
+    const others = chat.members.filter(
+      (member) => member.id !== currentUserId,
+    );
+    const here = others.filter(
+      (member) => userPresenceForChat(member, chat.id) === "in_chat",
+    ).length;
+    const inApp = others.filter(
+      (member) => userPresenceForChat(member, chat.id) === "app",
+    ).length;
+    return `${chat.members.length} participantes · ${here} aqui · ${inApp} no app`;
   }
   const other = chat.members.find((member) => member.id !== currentUserId);
   if (!other) return "";
-  if (other.online) return "online agora";
+  const presence = userPresenceForChat(other, chat.id);
+  if (presence === "in_chat") return "nesta conversa";
+  if (presence === "app") return "online em outro lugar";
   if (!other.lastSeenAt) return "offline";
   return `visto por último ${formatListTime(other.lastSeenAt)}`;
 }
@@ -333,8 +404,15 @@ function NewChatModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const filtered = users.filter((user) =>
-    user.displayName.toLocaleLowerCase("pt-BR").includes(query.toLocaleLowerCase("pt-BR")),
+  const normalizedQuery = query
+    .replace(/^[#@]/, "")
+    .toLocaleLowerCase("pt-BR");
+  const filtered = users.filter(
+    (user) =>
+      user.displayName
+        .toLocaleLowerCase("pt-BR")
+        .includes(normalizedQuery) ||
+      user.publicId.toLocaleLowerCase("pt-BR").includes(normalizedQuery),
   );
 
   const createDirect = async (userId: string) => {
@@ -437,12 +515,19 @@ function NewChatModal({
               >
                 <Avatar
                   name={person.displayName}
-                  online={person.online}
+                  avatarUrl={person.avatarUrl}
+                  avatarMediaType={person.avatarMediaType}
+                  presence={userPresenceForChat(person)}
                   size="small"
                 />
                 <span>
                   <b>{person.displayName}</b>
-                  <small>{person.online ? "Online agora" : "Disponível no CaosChat"}</small>
+                  <small>
+                    #{person.publicId} ·{" "}
+                    {person.presenceState === "away"
+                      ? "Ausente"
+                      : "No CaosChat"}
+                  </small>
                 </span>
                 {mode === "group" ? (
                   <i className={`checkbox ${checked ? "checked" : ""}`}>
@@ -477,6 +562,176 @@ function NewChatModal({
   );
 }
 
+function ProfileScreen({
+  user,
+  ownProfile,
+  onClose,
+  onSaved,
+}: {
+  user: User;
+  ownProfile: boolean;
+  onClose: () => void;
+  onSaved: (user: User) => void;
+}) {
+  const [displayName, setDisplayName] = useState(user.displayName);
+  const [bio, setBio] = useState(user.bio);
+  const [avatar, setAvatar] = useState<File>();
+  const [banner, setBanner] = useState<File>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const avatarPreview = useMemo(
+    () => (avatar ? URL.createObjectURL(avatar) : user.avatarUrl),
+    [avatar, user.avatarUrl],
+  );
+  const bannerPreview = useMemo(
+    () => (banner ? URL.createObjectURL(banner) : user.bannerUrl),
+    [banner, user.bannerUrl],
+  );
+  const avatarMediaType = avatar?.type ?? user.avatarMediaType;
+
+  useEffect(
+    () => () => {
+      if (avatarPreview?.startsWith("blob:")) URL.revokeObjectURL(avatarPreview);
+      if (bannerPreview?.startsWith("blob:")) URL.revokeObjectURL(bannerPreview);
+    },
+    [avatarPreview, bannerPreview],
+  );
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      let updated = (
+        await api.updateProfile(displayName.trim(), bio.trim())
+      ).user;
+      if (avatar || banner) {
+        updated = (await api.uploadProfileMedia(avatar, banner)).user;
+      }
+      onSaved(updated);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Não foi possível salvar.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="profile-screen" role="dialog" aria-modal="true">
+      <header className="profile-screen__top">
+        <button className="icon-button" onClick={onClose} aria-label="Voltar">
+          <ArrowLeft size={21} />
+        </button>
+        <div>
+          <span className="eyebrow">
+            {ownProfile ? "seu espaço" : "sobre esta pessoa"}
+          </span>
+          <b>{ownProfile ? "Editar perfil" : "Perfil"}</b>
+        </div>
+        <Logo compact />
+      </header>
+
+      <div className="profile-screen__scroll">
+        <section className="profile-hero">
+          <div className="profile-hero__banner">
+            {bannerPreview ? (
+              <img src={bannerPreview} alt="" />
+            ) : (
+              <span>
+                <Sparkles size={20} />
+              </span>
+            )}
+          </div>
+          <div className="profile-hero__identity">
+            <Avatar
+              name={user.displayName}
+              avatarUrl={avatarPreview}
+              avatarMediaType={avatarMediaType}
+              presence={userPresenceForChat(user)}
+              size="large"
+            />
+            <div>
+              <h2>{user.displayName}</h2>
+              <span className="profile-public-id">#{user.publicId}</span>
+            </div>
+          </div>
+        </section>
+
+        {ownProfile ? (
+          <form className="profile-form" onSubmit={save}>
+            <label>
+              Nome de exibição
+              <input
+                value={displayName}
+                minLength={2}
+                maxLength={40}
+                required
+                onChange={(event) => setDisplayName(event.target.value)}
+              />
+            </label>
+            <label>
+              Bio
+              <textarea
+                value={bio}
+                maxLength={300}
+                rows={4}
+                placeholder="Conte um pouco sobre você…"
+                onChange={(event) => setBio(event.target.value)}
+              />
+              <small>{bio.length}/300</small>
+            </label>
+            <div className="profile-media-fields">
+              <label className="profile-file">
+                <Camera size={19} />
+                <span>
+                  <b>Foto, GIF ou vídeo</b>
+                  <small>JPG, PNG, WebP, GIF até 8 MB; MP4/WebM até 12 MB</small>
+                </span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
+                  onChange={(event) => setAvatar(event.target.files?.[0])}
+                />
+              </label>
+              <label className="profile-file">
+                <ImageIcon size={19} />
+                <span>
+                  <b>Banner</b>
+                  <small>JPG, PNG, WebP ou GIF até 8 MB</small>
+                </span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  onChange={(event) => setBanner(event.target.files?.[0])}
+                />
+              </label>
+            </div>
+            {error && <div className="form-error">{error}</div>}
+            <button className="button button--primary" disabled={busy}>
+              {busy ? "Salvando…" : "Salvar perfil"}
+            </button>
+          </form>
+        ) : (
+          <section className="profile-about">
+            <span>Bio</span>
+            <p>{user.bio || "Esta pessoa ainda não escreveu uma bio."}</p>
+            <div>
+              <i
+                className={`presence-key presence-key--${userPresenceForChat(user)}`}
+              />
+              {user.presenceState === "away"
+                ? "Ausente agora"
+                : "Com o CaosChat aberto"}
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EmptyConversation({ onNewChat }: { onNewChat: () => void }) {
   return (
     <section className="empty-conversation">
@@ -501,9 +756,11 @@ function EmptyConversation({ onNewChat }: { onNewChat: () => void }) {
 function Messenger({
   currentUser,
   onLogout,
+  onCurrentUserChange,
 }: {
   currentUser: User;
   onLogout: () => void;
+  onCurrentUserChange: (user: User) => void;
 }) {
   const [chats, setChats] = useState<Chat[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -512,11 +769,15 @@ function Messenger({
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [showNewChat, setShowNewChat] = useState(false);
+  const [profileUser, setProfileUser] = useState<User | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [notice, setNotice] = useState("");
   const socketRef = useRef<Socket | null>(null);
+  const currentUserRef = useRef(currentUser);
   const selectedChatRef = useRef<string | null>(null);
+  const presenceChatRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  currentUserRef.current = currentUser;
 
   const loadChats = async () => {
     try {
@@ -524,6 +785,39 @@ function Messenger({
       setChats(result.chats);
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : "Erro ao buscar conversas.");
+    }
+  };
+
+  const applyUserUpdate = (updated: User) => {
+    if (updated.id === currentUser.id) onCurrentUserChange(updated);
+    setUsers((current) =>
+      current.map((user) => (user.id === updated.id ? updated : user)),
+    );
+    setChats((current) =>
+      current.map((chat) => ({
+        ...chat,
+        name:
+          chat.type === "direct" &&
+          chat.members.some((member) => member.id === updated.id) &&
+          updated.id !== currentUser.id
+            ? updated.displayName
+            : chat.name,
+        members: chat.members.map((member) =>
+          member.id === updated.id ? updated : member,
+        ),
+      })),
+    );
+    setProfileUser((shown) => (shown?.id === updated.id ? updated : shown));
+  };
+
+  const openProfile = async (userId: string) => {
+    try {
+      const { user } = await api.profile(userId);
+      setProfileUser(user);
+    } catch (caught) {
+      setNotice(
+        caught instanceof Error ? caught.message : "Perfil não encontrado.",
+      );
     }
   };
 
@@ -535,7 +829,19 @@ function Messenger({
 
     const socket = io();
     socketRef.current = socket;
-    socket.on("connect", () => socket.emit("receipts:sync"));
+    socket.on("connect", () => {
+      socket.emit("receipts:sync");
+      const chatId = presenceChatRef.current;
+      socket.emit("presence:report", {
+        state:
+          document.visibilityState !== "visible" || !document.hasFocus()
+            ? "away"
+            : chatId
+              ? "in_chat"
+              : "app",
+        ...(chatId && { chatId }),
+      });
+    });
     socket.on("message:new", (message: Message) => {
       if (message.senderId !== currentUser.id) {
         socket.emit("message:delivered", message.id);
@@ -546,7 +852,9 @@ function Messenger({
             ? current
             : [...current, message],
         );
-        socket.emit("chat:read", message.chatId);
+        if (message.chatId === presenceChatRef.current) {
+          socket.emit("chat:read", message.chatId);
+        }
       }
     });
     socket.on("receipt:updated", (receipt: ReceiptUpdate) => {
@@ -570,13 +878,20 @@ function Messenger({
     });
     socket.on("chats:refresh", () => void loadChats());
     socket.on(
-      "presence:update",
-      (presence: { userId: string; online: boolean; lastSeenAt?: string }) => {
+      "presence:changed",
+      (presence: {
+        userId: string;
+        state: User["presenceState"];
+        chatId: string | null;
+        lastSeenAt: string | null;
+      }) => {
         const updateUser = (user: User) =>
           user.id === presence.userId
             ? {
                 ...user,
-                online: presence.online,
+                online: presence.state !== "away",
+                presenceState: presence.state,
+                activeChatId: presence.chatId,
                 lastSeenAt: presence.lastSeenAt ?? user.lastSeenAt,
               }
             : user;
@@ -587,28 +902,53 @@ function Messenger({
             members: chat.members.map(updateUser),
           })),
         );
+        if (presence.userId === currentUser.id) {
+          onCurrentUserChange(updateUser(currentUserRef.current));
+        }
+        setProfileUser((shown) => (shown ? updateUser(shown) : shown));
       },
     );
+    socket.on("profile:updated", (updated: User) => applyUserUpdate(updated));
     return () => {
       socket.disconnect();
     };
   }, []);
 
   useEffect(() => {
-    const markReadWhenFocused = () => {
-      if (document.visibilityState !== "visible") return;
-      const chatId = selectedChatRef.current;
-      if (chatId && socketRef.current?.connected) {
-        socketRef.current.emit("chat:read", chatId);
+    const reportPresence = () => {
+      const chatId = presenceChatRef.current;
+      const foreground =
+        document.visibilityState === "visible" && document.hasFocus();
+      if (socketRef.current?.connected) {
+        socketRef.current.emit("presence:report", {
+          state: foreground ? (chatId ? "in_chat" : "app") : "away",
+          ...(foreground && chatId && { chatId }),
+        });
+        if (foreground && chatId) socketRef.current.emit("chat:read", chatId);
       }
     };
-    window.addEventListener("focus", markReadWhenFocused);
-    document.addEventListener("visibilitychange", markReadWhenFocused);
+    const heartbeat = window.setInterval(reportPresence, 15_000);
+    window.addEventListener("focus", reportPresence);
+    window.addEventListener("blur", reportPresence);
+    document.addEventListener("visibilitychange", reportPresence);
     return () => {
-      window.removeEventListener("focus", markReadWhenFocused);
-      document.removeEventListener("visibilitychange", markReadWhenFocused);
+      window.clearInterval(heartbeat);
+      window.removeEventListener("focus", reportPresence);
+      window.removeEventListener("blur", reportPresence);
+      document.removeEventListener("visibilitychange", reportPresence);
     };
   }, []);
+
+  useEffect(() => {
+    const chatId = profileUser || showNewChat ? null : selectedChatId;
+    presenceChatRef.current = chatId;
+    if (socketRef.current?.connected && document.visibilityState === "visible") {
+      socketRef.current.emit("presence:report", {
+        state: chatId ? "in_chat" : "app",
+        ...(chatId && { chatId }),
+      });
+    }
+  }, [profileUser, selectedChatId, showNewChat]);
 
   useEffect(() => {
     selectedChatRef.current = selectedChatId;
@@ -653,6 +993,11 @@ function Messenger({
     return chats.filter(
       (chat) =>
         chat.name.toLocaleLowerCase("pt-BR").includes(normalized) ||
+        chat.members.some((member) =>
+          member.publicId.toLocaleLowerCase("pt-BR").includes(
+            normalized.replace(/^[#@]/, ""),
+          ),
+        ) ||
         chat.lastMessage?.body.toLocaleLowerCase("pt-BR").includes(normalized),
     );
   }, [chats, search]);
@@ -711,11 +1056,22 @@ function Messenger({
           </button>
         </header>
         <div className="sidebar__profile">
-          <Avatar name={currentUser.displayName} online size="small" />
-          <div>
-            <b>{currentUser.displayName}</b>
-            <span>Disponível</span>
-          </div>
+          <button
+            className="profile-summary"
+            onClick={() => void openProfile(currentUser.id)}
+          >
+            <Avatar
+              name={currentUser.displayName}
+              avatarUrl={currentUser.avatarUrl}
+              avatarMediaType={currentUser.avatarMediaType}
+              presence={userPresenceForChat(currentUser, selectedChatId ?? undefined)}
+              size="small"
+            />
+            <span>
+              <b>{currentUser.displayName}</b>
+              <small>#{currentUser.publicId}</small>
+            </span>
+          </button>
           <button className="icon-button" onClick={onLogout} aria-label="Sair">
             <LogOut size={17} />
           </button>
@@ -759,7 +1115,11 @@ function Messenger({
                 <Avatar
                   name={chat.name}
                   group={chat.type === "group"}
-                  online={chat.type === "direct" && other?.online}
+                  avatarUrl={chat.type === "direct" ? other?.avatarUrl : null}
+                  avatarMediaType={
+                    chat.type === "direct" ? other?.avatarMediaType : null
+                  }
+                  presence={chatPresence(chat, currentUser.id)}
                 />
                 <span className="chat-list__body">
                   <span className="chat-list__line">
@@ -810,29 +1170,49 @@ function Messenger({
               >
                 <ArrowLeft size={21} />
               </button>
-              <Avatar
-                name={selectedChat.name}
-                group={selectedChat.type === "group"}
-                online={
-                  selectedChat.type === "direct" &&
-                  selectedChat.members.some(
-                    (member) => member.id !== currentUser.id && member.online,
-                  )
-                }
-                size="small"
-              />
-              <div>
-                <b>{selectedChat.name}</b>
-                <span
-                  className={
-                    presenceText(selectedChat, currentUser.id) === "online agora"
-                      ? "online-text"
-                      : ""
+              <button
+                className="conversation__person"
+                disabled={selectedChat.type === "group"}
+                onClick={() => {
+                  const other = selectedChat.members.find(
+                    (member) => member.id !== currentUser.id,
+                  );
+                  if (other) void openProfile(other.id);
+                }}
+              >
+                <Avatar
+                  name={selectedChat.name}
+                  group={selectedChat.type === "group"}
+                  avatarUrl={
+                    selectedChat.type === "direct"
+                      ? selectedChat.members.find(
+                          (member) => member.id !== currentUser.id,
+                        )?.avatarUrl
+                      : null
                   }
-                >
-                  {presenceText(selectedChat, currentUser.id)}
+                  avatarMediaType={
+                    selectedChat.type === "direct"
+                      ? selectedChat.members.find(
+                          (member) => member.id !== currentUser.id,
+                        )?.avatarMediaType
+                      : null
+                  }
+                  presence={chatPresence(selectedChat, currentUser.id)}
+                  size="small"
+                />
+                <span className="conversation__person-copy">
+                  <b>{selectedChat.name}</b>
+                  <small
+                    className={
+                      chatPresence(selectedChat, currentUser.id) === "in_chat"
+                        ? "online-text"
+                        : ""
+                    }
+                  >
+                    {presenceText(selectedChat, currentUser.id)}
+                  </small>
                 </span>
-              </div>
+              </button>
               <span className="conversation__brand">CaosChat</span>
             </header>
 
@@ -930,6 +1310,17 @@ function Messenger({
           onCreateGroup={createGroup}
         />
       )}
+      {profileUser && (
+        <ProfileScreen
+          user={profileUser}
+          ownProfile={profileUser.id === currentUser.id}
+          onClose={() => setProfileUser(null)}
+          onSaved={(updated) => {
+            applyUserUpdate(updated);
+            setProfileUser(updated);
+          }}
+        />
+      )}
       {notice && <div className="toast">{notice}</div>}
     </main>
   );
@@ -968,5 +1359,11 @@ export default function App() {
     return <AuthScreen onAuthenticated={setCurrentUser} />;
   }
 
-  return <Messenger currentUser={currentUser} onLogout={() => void logout()} />;
+  return (
+    <Messenger
+      currentUser={currentUser}
+      onLogout={() => void logout()}
+      onCurrentUserChange={setCurrentUser}
+    />
+  );
 }
