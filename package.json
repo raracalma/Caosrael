@@ -20,6 +20,7 @@
     "file-type": "^22.0.2",
     "lucide-react": "^1.41.0",
     "multer": "^2.3.0",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "socket.io": "^4.8.3",

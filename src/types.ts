@@ -1,6 +1,5 @@
 export type User = {
   id: string;
-  publicId: string;
   displayName: string;
   lastSeenAt: string | null;
   online: boolean;
@@ -41,10 +40,20 @@ export type ReceiptUpdate = {
 
 export type Chat = {
   id: string;
-  type: "direct" | "group";
+  type: "direct" | "group" | "channel";
   name: string;
+  createdBy: string;
+  channelToken: string | null;
   members: User[];
   lastMessage: Message | null;
   unreadCount: number;
   updatedAt: string;
+};
+
+export type ChatFolder = {
+  id: string;
+  name: string;
+  kind: "personal" | "groups" | "channels" | "custom";
+  position: number;
+  chatIds: string[];
 };

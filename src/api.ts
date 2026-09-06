@@ -1,4 +1,4 @@
-import type { Chat, Message, User } from "./types";
+import type { Chat, ChatFolder, Message, User } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const isFormData = options?.body instanceof FormData;
@@ -54,6 +54,19 @@ export const api = {
     });
   },
   chats: () => request<{ chats: Chat[] }>("/api/chats"),
+  folders: () => request<{ folders: ChatFolder[] }>("/api/folders"),
+  createFolder: (name: string, chatIds: string[]) =>
+    request<{ folder: ChatFolder }>("/api/folders", {
+      method: "POST",
+      body: JSON.stringify({ name, chatIds }),
+    }),
+  updateFolder: (folderId: string, name: string, chatIds: string[]) =>
+    request<{ folder: ChatFolder }>(`/api/folders/${folderId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name, chatIds }),
+    }),
+  deleteFolder: (folderId: string) =>
+    request<void>(`/api/folders/${folderId}`, { method: "DELETE" }),
   messages: (chatId: string) =>
     request<{ messages: Message[] }>(`/api/chats/${chatId}/messages`),
   markRead: (chatId: string) =>
@@ -67,5 +80,14 @@ export const api = {
     request<{ chat: Chat }>("/api/chats/group", {
       method: "POST",
       body: JSON.stringify({ name, memberIds }),
+    }),
+  createChannel: (name: string, memberIds: string[]) =>
+    request<{ chat: Chat }>("/api/chats/channel", {
+      method: "POST",
+      body: JSON.stringify({ name, memberIds }),
+    }),
+  joinChannel: (token: string) =>
+    request<{ chat: Chat }>(`/api/channels/join/${token}`, {
+      method: "POST",
     }),
 };

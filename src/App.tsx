@@ -4,21 +4,35 @@ import {
   Check,
   CheckCheck,
   ChevronRight,
+  Copy,
+  Folder,
   LogOut,
   Image as ImageIcon,
+  Megaphone,
   MessageCircleMore,
   MessagesSquare,
+  MoreVertical,
   Plus,
+  QrCode,
   Search,
   Send,
+  Settings,
+  Share2,
   Sparkles,
   Users,
   X,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { io, type Socket } from "socket.io-client";
 import { api } from "./api";
-import type { Chat, Message, ReceiptUpdate, User } from "./types";
+import type {
+  Chat,
+  ChatFolder,
+  Message,
+  ReceiptUpdate,
+  User,
+} from "./types";
 
 function initials(name: string) {
   return name
@@ -44,6 +58,7 @@ function Avatar({
   avatarMediaType,
   presence,
   group,
+  channel,
   size = "medium",
 }: {
   name: string;
@@ -51,6 +66,7 @@ function Avatar({
   avatarMediaType?: string | null;
   presence?: "in_chat" | "app" | "away";
   group?: boolean;
+  channel?: boolean;
   size?: "small" | "medium" | "large";
 }) {
   return (
@@ -61,6 +77,8 @@ function Avatar({
         ) : (
           <img src={avatarUrl} alt="" />
         )
+      ) : channel ? (
+        <Megaphone size={size === "large" ? 24 : 19} />
       ) : group ? (
         <Users size={size === "large" ? 24 : 19} />
       ) : (
@@ -365,7 +383,7 @@ function formatDay(value: string) {
 }
 
 function presenceText(chat: Chat, currentUserId: string) {
-  if (chat.type === "group") {
+  if (chat.type !== "direct") {
     const others = chat.members.filter(
       (member) => member.id !== currentUserId,
     );
@@ -375,7 +393,11 @@ function presenceText(chat: Chat, currentUserId: string) {
     const inApp = others.filter(
       (member) => userPresenceForChat(member, chat.id) === "app",
     ).length;
-    return `${chat.members.length} participantes · ${here} aqui · ${inApp} no app`;
+    const peopleLabel =
+      chat.type === "channel"
+        ? `${chat.members.length} inscritos`
+        : `${chat.members.length} participantes`;
+    return `${peopleLabel} · ${here} aqui · ${inApp} no app`;
   }
   const other = chat.members.find((member) => member.id !== currentUserId);
   if (!other) return "";
@@ -388,31 +410,31 @@ function presenceText(chat: Chat, currentUserId: string) {
 
 function NewChatModal({
   users,
+  initialMode,
   onClose,
   onCreateDirect,
   onCreateGroup,
+  onCreateChannel,
 }: {
   users: User[];
+  initialMode: "direct" | "group" | "channel";
   onClose: () => void;
   onCreateDirect: (userId: string) => Promise<void>;
   onCreateGroup: (name: string, memberIds: string[]) => Promise<void>;
+  onCreateChannel: (name: string, memberIds: string[]) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<"direct" | "group">("direct");
+  const [mode, setMode] = useState<"direct" | "group" | "channel">(
+    initialMode,
+  );
   const [query, setQuery] = useState("");
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const normalizedQuery = query
-    .replace(/^[#@]/, "")
-    .toLocaleLowerCase("pt-BR");
-  const filtered = users.filter(
-    (user) =>
-      user.displayName
-        .toLocaleLowerCase("pt-BR")
-        .includes(normalizedQuery) ||
-      user.publicId.toLocaleLowerCase("pt-BR").includes(normalizedQuery),
+  const normalizedQuery = query.toLocaleLowerCase("pt-BR");
+  const filtered = users.filter((user) =>
+    user.displayName.toLocaleLowerCase("pt-BR").includes(normalizedQuery),
   );
 
   const createDirect = async (userId: string) => {
@@ -426,12 +448,13 @@ function NewChatModal({
     }
   };
 
-  const createGroup = async (event: FormEvent) => {
+  const createCollective = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await onCreateGroup(name, selected);
+      if (mode === "group") await onCreateGroup(name, selected);
+      if (mode === "channel") await onCreateChannel(name, selected);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Tente novamente.");
       setBusy(false);
@@ -469,17 +492,25 @@ function NewChatModal({
           >
             <Users size={17} /> Criar grupo
           </button>
+          <button
+            className={mode === "channel" ? "active" : ""}
+            onClick={() => setMode("channel")}
+          >
+            <Megaphone size={17} /> Canal
+          </button>
         </div>
 
-        {mode === "group" && (
+        {mode !== "direct" && (
           <label className="modal__group-name">
-            Nome do grupo
+            Nome do {mode === "channel" ? "canal" : "grupo"}
             <input
               autoFocus
               value={name}
               maxLength={50}
               onChange={(event) => setName(event.target.value)}
-              placeholder="Ex.: Papo de domingo"
+              placeholder={
+                mode === "channel" ? "Ex.: Novidades do Caos" : "Ex.: Papo de domingo"
+              }
             />
           </label>
         )}
@@ -523,13 +554,12 @@ function NewChatModal({
                 <span>
                   <b>{person.displayName}</b>
                   <small>
-                    #{person.publicId} ·{" "}
                     {person.presenceState === "away"
                       ? "Ausente"
                       : "No CaosChat"}
                   </small>
                 </span>
-                {mode === "group" ? (
+                {mode !== "direct" ? (
                   <i className={`checkbox ${checked ? "checked" : ""}`}>
                     {checked && <Check size={14} />}
                   </i>
@@ -544,16 +574,31 @@ function NewChatModal({
           )}
         </div>
         {error && <div className="form-error modal__error">{error}</div>}
-        {mode === "group" && (
-          <form onSubmit={createGroup} className="modal__footer">
+        {mode !== "direct" && (
+          <form onSubmit={createCollective} className="modal__footer">
             <span>
-              {selected.length} {selected.length === 1 ? "pessoa" : "pessoas"}
+              {selected.length}{" "}
+              {mode === "channel"
+                ? selected.length === 1
+                  ? "convidado"
+                  : "convidados"
+                : selected.length === 1
+                  ? "pessoa"
+                  : "pessoas"}
             </span>
             <button
               className="button button--primary"
-              disabled={busy || name.trim().length < 2 || selected.length < 1}
+              disabled={
+                busy ||
+                name.trim().length < 2 ||
+                (mode === "group" && selected.length < 1)
+              }
             >
-              {busy ? "Criando…" : "Criar grupo"}
+              {busy
+                ? "Criando…"
+                : mode === "channel"
+                  ? "Criar canal"
+                  : "Criar grupo"}
             </button>
           </form>
         )}
@@ -659,7 +704,6 @@ function ProfileScreen({
             />
             <div>
               <h2>{user.displayName}</h2>
-              <span className="profile-public-id">#{user.publicId}</span>
             </div>
           </div>
         </section>
@@ -742,7 +786,312 @@ function ProfileScreen({
   );
 }
 
-function EmptyConversation({ onNewChat }: { onNewChat: () => void }) {
+function SettingsScreen({
+  currentUser,
+  folders,
+  chats,
+  onClose,
+  onOpenProfile,
+  onCreateFolder,
+  onUpdateFolder,
+  onDeleteFolder,
+  onLogout,
+}: {
+  currentUser: User;
+  folders: ChatFolder[];
+  chats: Chat[];
+  onClose: () => void;
+  onOpenProfile: () => void;
+  onCreateFolder: (name: string, chatIds: string[]) => Promise<void>;
+  onUpdateFolder: (
+    folderId: string,
+    name: string,
+    chatIds: string[],
+  ) => Promise<void>;
+  onDeleteFolder: (folderId: string) => Promise<void>;
+  onLogout: () => void;
+}) {
+  const [section, setSection] = useState<"root" | "folders">("root");
+  const [editing, setEditing] = useState<ChatFolder | "new" | null>(null);
+  const [name, setName] = useState("");
+  const [chatIds, setChatIds] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const startEditing = (folder: ChatFolder | "new") => {
+    setEditing(folder);
+    setName(folder === "new" ? "" : folder.name);
+    setChatIds(folder === "new" ? [] : folder.chatIds);
+    setError("");
+  };
+
+  const saveFolder = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      if (editing === "new") await onCreateFolder(name, chatIds);
+      if (editing && editing !== "new") {
+        await onUpdateFolder(editing.id, name, chatIds);
+      }
+      setEditing(null);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Não foi possível salvar.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const goBack = () => {
+    if (editing) {
+      setEditing(null);
+      return;
+    }
+    if (section === "folders") {
+      setSection("root");
+      return;
+    }
+    onClose();
+  };
+
+  return (
+    <div className="settings-screen">
+      <header className="profile-screen__top">
+        <button className="icon-button" onClick={goBack} aria-label="Voltar">
+          <ArrowLeft size={21} />
+        </button>
+        <div>
+          <span className="eyebrow">organize seu espaço</span>
+          <b>
+            {editing
+              ? editing === "new"
+                ? "Nova pasta"
+                : "Editar pasta"
+              : section === "folders"
+                ? "Conversas"
+                : "Configurações"}
+          </b>
+        </div>
+        <Settings className="settings-screen__mark" size={20} />
+      </header>
+
+      <div className="settings-screen__body">
+        {section === "root" ? (
+          <div className="settings-list">
+            <button onClick={onOpenProfile}>
+              <Avatar
+                name={currentUser.displayName}
+                avatarUrl={currentUser.avatarUrl}
+                avatarMediaType={currentUser.avatarMediaType}
+                size="medium"
+              />
+              <span>
+                <b>Configuração de perfil</b>
+                <small>Nome, bio, avatar e banner</small>
+              </span>
+              <ChevronRight size={18} />
+            </button>
+            <button onClick={() => setSection("folders")}>
+              <span className="settings-list__icon">
+                <Folder size={20} />
+              </span>
+              <span>
+                <b>Conversas</b>
+                <small>Pastas e organização da lista</small>
+              </span>
+              <ChevronRight size={18} />
+            </button>
+            <button className="settings-list__logout" onClick={onLogout}>
+              <span className="settings-list__icon">
+                <LogOut size={19} />
+              </span>
+              <span>
+                <b>Sair do CaosChat</b>
+                <small>Encerrar esta sessão</small>
+              </span>
+            </button>
+          </div>
+        ) : editing ? (
+          <form className="folder-editor" onSubmit={saveFolder}>
+            <label>
+              Nome da pasta
+              <input
+                autoFocus
+                value={name}
+                maxLength={24}
+                required
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Ex.: Trabalho"
+              />
+            </label>
+            <div className="folder-editor__chats">
+              <span>Conversas nesta pasta</span>
+              {chats.map((chat) => {
+                const checked = chatIds.includes(chat.id);
+                return (
+                  <button
+                    type="button"
+                    key={chat.id}
+                    onClick={() =>
+                      setChatIds((current) =>
+                        checked
+                          ? current.filter((id) => id !== chat.id)
+                          : [...current, chat.id],
+                      )
+                    }
+                  >
+                    <span className={`checkbox ${checked ? "checked" : ""}`}>
+                      {checked && <Check size={14} />}
+                    </span>
+                    <span>
+                      <b>{chat.name}</b>
+                      <small>
+                        {chat.type === "direct"
+                          ? "Conversa"
+                          : chat.type === "group"
+                            ? "Grupo"
+                            : "Canal"}
+                      </small>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {error && <div className="form-error">{error}</div>}
+            <div className="folder-editor__actions">
+              {editing !== "new" && (
+                <button
+                  type="button"
+                  className="button folder-editor__delete"
+                  onClick={() => {
+                    void onDeleteFolder(editing.id).then(() =>
+                      setEditing(null),
+                    );
+                  }}
+                >
+                  Remover
+                </button>
+              )}
+              <button
+                className="button button--primary"
+                disabled={busy || !name.trim()}
+              >
+                {busy ? "Salvando…" : "Salvar pasta"}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="folders-settings">
+            <div className="folders-settings__intro">
+              <div>
+                <span className="eyebrow">até 10 pastas</span>
+                <h2>Suas conversas, do seu jeito.</h2>
+              </div>
+              <button
+                className="button button--soft"
+                disabled={folders.length >= 10}
+                onClick={() => startEditing("new")}
+              >
+                <Plus size={17} /> Nova pasta
+              </button>
+            </div>
+            <div className="folders-settings__list">
+              {folders.map((folder) => (
+                <button
+                  key={folder.id}
+                  disabled={folder.kind !== "custom"}
+                  onClick={() => startEditing(folder)}
+                >
+                  <span className="settings-list__icon">
+                    <Folder size={19} />
+                  </span>
+                  <span>
+                    <b>{folder.name}</b>
+                    <small>
+                      {folder.chatIds.length} conversas ·{" "}
+                      {folder.kind === "custom" ? "Personalizada" : "Padrão"}
+                    </small>
+                  </span>
+                  {folder.kind === "custom" && <ChevronRight size={17} />}
+                </button>
+              ))}
+            </div>
+            <small className="folders-settings__limit">
+              {folders.length}/10 pastas em uso
+            </small>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ChannelInviteModal({
+  chat,
+  onClose,
+}: {
+  chat: Chat;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const inviteLink = `${window.location.origin}/join/${chat.channelToken}`;
+  const copyLink = async () => {
+    await navigator.clipboard.writeText(inviteLink);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2_000);
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section
+        className="modal channel-invite"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="modal__header">
+          <div>
+            <span className="eyebrow">convite do canal</span>
+            <h2>{chat.name}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose}>
+            <X size={20} />
+          </button>
+        </header>
+        <div className="channel-invite__qr">
+          <QRCodeSVG
+            value={inviteLink}
+            size={184}
+            level="M"
+            bgColor="#ffffff"
+            fgColor="#174f47"
+          />
+        </div>
+        <p>Escaneie o QR Code ou compartilhe o link para entrar no canal.</p>
+        <div className="channel-invite__link">
+          <span>{inviteLink}</span>
+          <button onClick={() => void copyLink()} aria-label="Copiar link">
+            {copied ? <Check size={17} /> : <Copy size={17} />}
+          </button>
+        </div>
+        <button
+          className="button button--primary"
+          onClick={() => {
+            if (navigator.share) {
+              void navigator.share({ title: chat.name, url: inviteLink });
+            } else {
+              void copyLink();
+            }
+          }}
+        >
+          <Share2 size={17} /> Compartilhar convite
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function EmptyConversation() {
   return (
     <section className="empty-conversation">
       <div className="empty-conversation__art">
@@ -756,9 +1105,9 @@ function EmptyConversation({ onNewChat }: { onNewChat: () => void }) {
         Selecione uma conversa ao lado ou comece uma nova. O importante é
         aparecer por inteiro.
       </p>
-      <button className="button button--soft" onClick={onNewChat}>
-        <Plus size={18} /> Nova conversa
-      </button>
+      <span className="empty-conversation__hint">
+        Use o botão + na barra inferior para começar.
+      </span>
     </section>
   );
 }
@@ -767,18 +1116,30 @@ function Messenger({
   currentUser,
   onLogout,
   onCurrentUserChange,
+  initialChatId,
 }: {
   currentUser: User;
   onLogout: () => void;
   onCurrentUserChange: (user: User) => void;
+  initialChatId?: string | null;
 }) {
   const [chats, setChats] = useState<Chat[]>([]);
+  const [folders, setFolders] = useState<ChatFolder[]>([]);
   const [users, setUsers] = useState<User[]>([]);
-  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(
+    initialChatId ?? null,
+  );
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [showNewChat, setShowNewChat] = useState(false);
+  const [newChatMode, setNewChatMode] = useState<
+    "direct" | "group" | "channel"
+  >("direct");
+  const [showOverflow, setShowOverflow] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [channelInvite, setChannelInvite] = useState<Chat | null>(null);
   const [profileUser, setProfileUser] = useState<User | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [notice, setNotice] = useState("");
@@ -797,6 +1158,29 @@ function Messenger({
       setNotice(caught instanceof Error ? caught.message : "Erro ao buscar conversas.");
     }
   };
+
+  const loadFolders = async () => {
+    try {
+      const result = await api.folders();
+      setFolders(result.folders);
+      setActiveFolderId((current) =>
+        current && result.folders.some((folder) => folder.id === current)
+          ? current
+          : result.folders[0]?.id ?? null,
+      );
+    } catch (caught) {
+      setNotice(
+        caught instanceof Error ? caught.message : "Erro ao buscar pastas.",
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!initialChatId) return;
+    void Promise.all([loadChats(), loadFolders()]).then(() =>
+      setSelectedChatId(initialChatId),
+    );
+  }, [initialChatId]);
 
   const applyUserUpdate = (updated: User) => {
     if (updated.id === currentUser.id) onCurrentUserChange(updated);
@@ -834,6 +1218,7 @@ function Messenger({
   useEffect(() => {
     void Promise.all([
       loadChats(),
+      loadFolders(),
       api.users().then((result) => setUsers(result.users)),
     ]);
 
@@ -886,7 +1271,9 @@ function Messenger({
         ),
       );
     });
-    socket.on("chats:refresh", () => void loadChats());
+    socket.on("chats:refresh", () => {
+      void Promise.all([loadChats(), loadFolders()]);
+    });
     socket.on(
       "presence:changed",
       (presence: {
@@ -950,7 +1337,10 @@ function Messenger({
   }, []);
 
   useEffect(() => {
-    const chatId = profileUser || showNewChat ? null : selectedChatId;
+    const chatId =
+      profileUser || showNewChat || showSettings || channelInvite
+        ? null
+        : selectedChatId;
     presenceChatRef.current = chatId;
     if (socketRef.current?.connected && document.visibilityState === "visible") {
       socketRef.current.emit("presence:report", {
@@ -958,7 +1348,13 @@ function Messenger({
         ...(chatId && { chatId }),
       });
     }
-  }, [profileUser, selectedChatId, showNewChat]);
+  }, [
+    channelInvite,
+    profileUser,
+    selectedChatId,
+    showNewChat,
+    showSettings,
+  ]);
 
   useEffect(() => {
     selectedChatRef.current = selectedChatId;
@@ -998,19 +1394,20 @@ function Messenger({
 
   const selectedChat = chats.find((chat) => chat.id === selectedChatId) ?? null;
   const filteredChats = useMemo(() => {
+    const activeFolder = folders.find(
+      (folder) => folder.id === activeFolderId,
+    );
+    const folderChats = activeFolder
+      ? chats.filter((chat) => activeFolder.chatIds.includes(chat.id))
+      : chats;
     const normalized = search.trim().toLocaleLowerCase("pt-BR");
-    if (!normalized) return chats;
-    return chats.filter(
+    if (!normalized) return folderChats;
+    return folderChats.filter(
       (chat) =>
         chat.name.toLocaleLowerCase("pt-BR").includes(normalized) ||
-        chat.members.some((member) =>
-          member.publicId.toLocaleLowerCase("pt-BR").includes(
-            normalized.replace(/^[#@]/, ""),
-          ),
-        ) ||
         chat.lastMessage?.body.toLocaleLowerCase("pt-BR").includes(normalized),
     );
-  }, [chats, search]);
+  }, [activeFolderId, chats, folders, search]);
 
   const openChat = (chatId: string) => {
     setSelectedChatId(chatId);
@@ -1040,16 +1437,50 @@ function Messenger({
 
   const createDirect = async (userId: string) => {
     const { chat } = await api.createDirect(userId);
-    await loadChats();
+    await Promise.all([loadChats(), loadFolders()]);
     setSelectedChatId(chat.id);
     setShowNewChat(false);
   };
 
   const createGroup = async (name: string, memberIds: string[]) => {
     const { chat } = await api.createGroup(name, memberIds);
-    await loadChats();
+    await Promise.all([loadChats(), loadFolders()]);
     setSelectedChatId(chat.id);
     setShowNewChat(false);
+  };
+
+  const createChannel = async (name: string, memberIds: string[]) => {
+    const { chat } = await api.createChannel(name, memberIds);
+    await Promise.all([loadChats(), loadFolders()]);
+    setSelectedChatId(chat.id);
+    setShowNewChat(false);
+    setChannelInvite(chat);
+  };
+
+  const openNewChat = (mode: "direct" | "group" | "channel" = "direct") => {
+    setNewChatMode(mode);
+    setShowOverflow(false);
+    setShowNewChat(true);
+  };
+
+  const createCustomFolder = async (name: string, chatIds: string[]) => {
+    await api.createFolder(name, chatIds);
+    await loadFolders();
+  };
+
+  const updateCustomFolder = async (
+    folderId: string,
+    name: string,
+    chatIds: string[],
+  ) => {
+    await api.updateFolder(folderId, name, chatIds);
+    await loadFolders();
+  };
+
+  const deleteCustomFolder = async (folderId: string) => {
+    await api.deleteFolder(folderId);
+    if (activeFolderId === folderId) setActiveFolderId(null);
+    await loadFolders();
   };
 
   return (
@@ -1058,42 +1489,50 @@ function Messenger({
         <header className="sidebar__top">
           <Logo />
           <button
-            className="icon-button icon-button--new"
-            onClick={() => setShowNewChat(true)}
-            aria-label="Nova conversa"
+            className="icon-button"
+            onClick={() => setShowOverflow((current) => !current)}
+            aria-label="Abrir menu"
           >
-            <Plus size={20} />
+            <MoreVertical size={20} />
           </button>
+          {showOverflow && (
+            <div className="overflow-menu">
+              <button onClick={() => openNewChat("group")}>
+                <Users size={17} /> Novo grupo
+              </button>
+              <button onClick={() => openNewChat("channel")}>
+                <Megaphone size={17} /> Novo canal
+              </button>
+              <button
+                onClick={() => {
+                  setShowOverflow(false);
+                  setShowSettings(true);
+                }}
+              >
+                <Settings size={17} /> Configurações
+              </button>
+            </div>
+          )}
         </header>
-        <div className="sidebar__profile">
-          <button
-            className="profile-summary"
-            onClick={() => void openProfile(currentUser.id)}
-          >
-            <Avatar
-              name={currentUser.displayName}
-              avatarUrl={currentUser.avatarUrl}
-              avatarMediaType={currentUser.avatarMediaType}
-              presence={userPresenceForChat(currentUser, selectedChatId ?? undefined)}
-              size="small"
-            />
-            <span>
-              <b>{currentUser.displayName}</b>
-              <small>#{currentUser.publicId}</small>
-            </span>
-          </button>
-          <button className="icon-button" onClick={onLogout} aria-label="Sair">
-            <LogOut size={17} />
-          </button>
-        </div>
         <div className="sidebar__inbox-heading">
           <div>
-            <span>Mensagens</span>
+            <span>Conversas</span>
             <small>{chats.length} conversas</small>
           </div>
-          <button onClick={() => setShowNewChat(true)}>
-            <Plus size={16} /> Nova
-          </button>
+        </div>
+        <div className="folder-tabs" role="tablist" aria-label="Pastas">
+          {folders.map((folder) => (
+            <button
+              key={folder.id}
+              role="tab"
+              aria-selected={folder.id === activeFolderId}
+              className={folder.id === activeFolderId ? "active" : ""}
+              onClick={() => setActiveFolderId(folder.id)}
+            >
+              {folder.name}
+              {folder.chatIds.length > 0 && <span>{folder.chatIds.length}</span>}
+            </button>
+          ))}
         </div>
         <div className="search-field">
           <Search size={17} />
@@ -1125,6 +1564,7 @@ function Messenger({
                 <Avatar
                   name={chat.name}
                   group={chat.type === "group"}
+                  channel={chat.type === "channel"}
                   avatarUrl={chat.type === "direct" ? other?.avatarUrl : null}
                   avatarMediaType={
                     chat.type === "direct" ? other?.avatarMediaType : null
@@ -1158,14 +1598,27 @@ function Messenger({
               <span>
                 {search
                   ? "Tente buscar por outro nome."
-                  : "Encontre uma pessoa no botão Nova."}
+                  : "Use o botão + para iniciar uma conversa."}
               </span>
             </div>
           )}
         </nav>
-        <footer className="sidebar__footer">
-          <i />
-          Suas conversas ficam salvas neste dispositivo.
+        <footer className="sidebar__bottom">
+          <button className="active">
+            <MessagesSquare size={20} />
+            <span>Conversas</span>
+          </button>
+          <button onClick={() => setShowSettings(true)}>
+            <Settings size={20} />
+            <span>Ajustes</span>
+          </button>
+          <button
+            className="sidebar__fab"
+            onClick={() => openNewChat("direct")}
+            aria-label="Nova conversa"
+          >
+            <Plus size={24} />
+          </button>
         </footer>
       </aside>
 
@@ -1182,7 +1635,7 @@ function Messenger({
               </button>
               <button
                 className="conversation__person"
-                disabled={selectedChat.type === "group"}
+                disabled={selectedChat.type !== "direct"}
                 onClick={() => {
                   const other = selectedChat.members.find(
                     (member) => member.id !== currentUser.id,
@@ -1193,6 +1646,7 @@ function Messenger({
                 <Avatar
                   name={selectedChat.name}
                   group={selectedChat.type === "group"}
+                  channel={selectedChat.type === "channel"}
                   avatarUrl={
                     selectedChat.type === "direct"
                       ? selectedChat.members.find(
@@ -1223,6 +1677,15 @@ function Messenger({
                   </small>
                 </span>
               </button>
+              {selectedChat.type === "channel" && (
+                <button
+                  className="icon-button conversation__invite"
+                  onClick={() => setChannelInvite(selectedChat)}
+                  aria-label="Compartilhar canal"
+                >
+                  <QrCode size={19} />
+                </button>
+              )}
               <span className="conversation__brand">CaosChat</span>
             </header>
 
@@ -1280,44 +1743,73 @@ function Messenger({
               <div ref={messagesEndRef} />
             </div>
 
-            <form className="composer" onSubmit={sendMessage}>
-              <div className="composer__input">
-                <textarea
-                  rows={1}
-                  value={draft}
-                  maxLength={4_000}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                  placeholder="Escreva uma mensagem…"
-                  aria-label="Mensagem"
-                />
-                <span>{draft.length > 3_800 ? 4_000 - draft.length : ""}</span>
+            {selectedChat.type === "channel" &&
+            selectedChat.createdBy !== currentUser.id ? (
+              <div className="channel-readonly">
+                <Megaphone size={17} />
+                Somente o dono publica neste canal.
               </div>
-              <button
-                className="send-button"
-                disabled={!draft.trim()}
-                aria-label="Enviar mensagem"
-              >
-                <Send size={20} />
-              </button>
-            </form>
+            ) : (
+              <form className="composer" onSubmit={sendMessage}>
+                <div className="composer__input">
+                  <textarea
+                    rows={1}
+                    value={draft}
+                    maxLength={4_000}
+                    onChange={(event) => setDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                    placeholder={
+                      selectedChat.type === "channel"
+                        ? "Publicar no canal…"
+                        : "Escreva uma mensagem…"
+                    }
+                    aria-label="Mensagem"
+                  />
+                  <span>
+                    {draft.length > 3_800 ? 4_000 - draft.length : ""}
+                  </span>
+                </div>
+                <button
+                  className="send-button"
+                  disabled={!draft.trim()}
+                  aria-label="Enviar mensagem"
+                >
+                  <Send size={20} />
+                </button>
+              </form>
+            )}
           </>
         ) : (
-          <EmptyConversation onNewChat={() => setShowNewChat(true)} />
+          <EmptyConversation />
         )}
       </section>
 
       {showNewChat && (
         <NewChatModal
           users={users}
+          initialMode={newChatMode}
           onClose={() => setShowNewChat(false)}
           onCreateDirect={createDirect}
           onCreateGroup={createGroup}
+          onCreateChannel={createChannel}
+        />
+      )}
+      {showSettings && (
+        <SettingsScreen
+          currentUser={currentUser}
+          folders={folders}
+          chats={chats}
+          onClose={() => setShowSettings(false)}
+          onOpenProfile={() => void openProfile(currentUser.id)}
+          onCreateFolder={createCustomFolder}
+          onUpdateFolder={updateCustomFolder}
+          onDeleteFolder={deleteCustomFolder}
+          onLogout={onLogout}
         />
       )}
       {profileUser && (
@@ -1331,6 +1823,12 @@ function Messenger({
           }}
         />
       )}
+      {channelInvite && (
+        <ChannelInviteModal
+          chat={channelInvite}
+          onClose={() => setChannelInvite(null)}
+        />
+      )}
       {notice && <div className="toast">{notice}</div>}
     </main>
   );
@@ -1339,6 +1837,8 @@ function Messenger({
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [joinedChatId, setJoinedChatId] = useState<string | null>(null);
+  const [joinNotice, setJoinNotice] = useState("");
 
   useEffect(() => {
     api
@@ -1347,6 +1847,24 @@ export default function App() {
       .catch(() => setCurrentUser(null))
       .finally(() => setCheckingSession(false));
   }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const match = window.location.pathname.match(/^\/join\/([A-Za-z0-9_-]{16})$/);
+    if (!match) return;
+    api
+      .joinChannel(match[1])
+      .then(({ chat }) => {
+        setJoinedChatId(chat.id);
+        setJoinNotice(`Você entrou no canal ${chat.name}.`);
+        window.history.replaceState({}, "", "/");
+      })
+      .catch((caught) => {
+        setJoinNotice(
+          caught instanceof Error ? caught.message : "Convite de canal inválido.",
+        );
+      });
+  }, [currentUser]);
 
   const logout = async () => {
     try {
@@ -1370,10 +1888,14 @@ export default function App() {
   }
 
   return (
-    <Messenger
-      currentUser={currentUser}
-      onLogout={() => void logout()}
-      onCurrentUserChange={setCurrentUser}
-    />
+    <>
+      <Messenger
+        currentUser={currentUser}
+        onLogout={() => void logout()}
+        onCurrentUserChange={setCurrentUser}
+        initialChatId={joinedChatId}
+      />
+      {joinNotice && <div className="toast">{joinNotice}</div>}
+    </>
   );
 }

@@ -46,9 +46,10 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS chats (
     id TEXT PRIMARY KEY,
-    type TEXT NOT NULL CHECK (type IN ('direct', 'group')),
+    type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'channel')),
     name TEXT,
     direct_key TEXT UNIQUE,
+    channel_token TEXT UNIQUE,
     created_by TEXT NOT NULL REFERENCES users(id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -85,6 +86,77 @@ db.exec(`
 `);
 
 type ColumnInfo = { name: string };
+
+function migrateChatsForChannels() {
+  const definition = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chats'")
+    .get() as { sql: string };
+  if (definition.sql.includes("'channel'")) return;
+
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  try {
+    db.exec(`
+      BEGIN IMMEDIATE;
+
+      ALTER TABLE chats RENAME TO chats_before_channels;
+
+      CREATE TABLE chats (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'channel')),
+        name TEXT,
+        direct_key TEXT UNIQUE,
+        channel_token TEXT UNIQUE,
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      INSERT INTO chats
+        (
+          id,
+          type,
+          name,
+          direct_key,
+          channel_token,
+          created_by,
+          created_at,
+          updated_at
+        )
+      SELECT
+        id,
+        type,
+        name,
+        direct_key,
+        NULL,
+        created_by,
+        created_at,
+        updated_at
+      FROM chats_before_channels;
+
+      DROP TABLE chats_before_channels;
+      CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at);
+
+      COMMIT;
+    `);
+  } catch (error) {
+    if (db.inTransaction) db.exec("ROLLBACK");
+    throw new Error("Não foi possível migrar conversas para suportar canais.", {
+      cause: error,
+    });
+  } finally {
+    db.pragma("legacy_alter_table = OFF");
+    db.pragma("foreign_keys = ON");
+  }
+
+  const violations = db.pragma("foreign_key_check") as unknown[];
+  if (violations.length) {
+    throw new Error("A migração de canais encontrou referências inválidas.");
+  }
+}
+
+migrateChatsForChannels();
+
 const userColumns = db.pragma("table_info(users)") as ColumnInfo[];
 const messageColumns = db.pragma("table_info(messages)") as ColumnInfo[];
 
@@ -131,6 +203,26 @@ db.exec(`
     ON message_receipts(user_id, status);
   CREATE INDEX IF NOT EXISTS idx_message_receipts_message
     ON message_receipts(message_id);
+
+  CREATE TABLE IF NOT EXISTS chat_folders (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL
+      CHECK (kind IN ('personal', 'groups', 'channels', 'custom')),
+    position INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (user_id, name)
+  );
+
+  CREATE TABLE IF NOT EXISTS chat_folder_items (
+    folder_id TEXT NOT NULL REFERENCES chat_folders(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    PRIMARY KEY (folder_id, chat_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chat_folders_user_position
+    ON chat_folders(user_id, position);
 `);
 
 function insertMessage(
@@ -272,6 +364,37 @@ function backfillPublicIds() {
   })();
 }
 
+export function ensureDefaultFoldersForUser(userId: string) {
+  const createdAt = new Date().toISOString();
+  const defaults = [
+    { name: "Pessoal", kind: "personal", position: 0 },
+    { name: "Grupos", kind: "groups", position: 1 },
+    { name: "Canais", kind: "channels", position: 2 },
+  ] as const;
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO chat_folders
+      (id, user_id, name, kind, position, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    defaults.forEach((folder) =>
+      insert.run(
+        randomUUID(),
+        userId,
+        folder.name,
+        folder.kind,
+        folder.position,
+        createdAt,
+      ),
+    );
+  })();
+}
+
+function backfillDefaultFolders() {
+  const users = db.prepare("SELECT id FROM users").all() as Array<{ id: string }>;
+  users.forEach((user) => ensureDefaultFoldersForUser(user.id));
+}
+
 function backfillMessageReceipts() {
   const backfill = db.transaction(() => {
     db.exec(`
@@ -363,4 +486,5 @@ function backfillMessageReceipts() {
 
 seedDemoData();
 backfillPublicIds();
+backfillDefaultFolders();
 backfillMessageReceipts();
