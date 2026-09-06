@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { db } from "./db.js";
+import { db, ensureDefaultFoldersForUser } from "./db.js";
 import {
   aggregateDeliveryStatus,
   type DeliveryStatus,
@@ -29,8 +29,9 @@ type UserRow = {
 
 type ChatRow = {
   id: string;
-  type: "direct" | "group";
+  type: "direct" | "group" | "channel";
   name: string | null;
+  channel_token: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -49,7 +50,6 @@ type MessageRow = {
 
 export type PublicUser = {
   id: string;
-  publicId: string;
   displayName: string;
   lastSeenAt: string | null;
   online: boolean;
@@ -85,12 +85,22 @@ export type ReceiptUpdate = {
 
 export type ChatSummary = {
   id: string;
-  type: "direct" | "group";
+  type: "direct" | "group" | "channel";
   name: string;
+  createdBy: string;
+  channelToken: string | null;
   members: PublicUser[];
   lastMessage: Message | null;
   unreadCount: number;
   updatedAt: string;
+};
+
+export type ChatFolder = {
+  id: string;
+  name: string;
+  kind: "personal" | "groups" | "channels" | "custom";
+  position: number;
+  chatIds: string[];
 };
 
 function mapUser(
@@ -100,7 +110,6 @@ function mapUser(
   const presence = presenceLookup.get(row.id);
   return {
     id: row.id,
-    publicId: row.public_id,
     displayName: row.display_name,
     lastSeenAt: presence?.lastSeenAt ?? row.last_seen_at,
     online: Boolean(presence && presence.state !== "away"),
@@ -259,6 +268,7 @@ export function createUser(displayName: string, password: string) {
         createdAt,
         createdAt,
       );
+      ensureDefaultFoldersForUser(id);
       return mapUser(findUserById(id)!);
     } catch (error) {
       if (
@@ -358,6 +368,120 @@ export function getContactUserIds(userId: string) {
   return rows.map((row) => row.user_id);
 }
 
+export function listFolders(userId: string): ChatFolder[] {
+  ensureDefaultFoldersForUser(userId);
+  const folders = db
+    .prepare(
+      `SELECT id, name, kind, position
+       FROM chat_folders
+       WHERE user_id = ?
+       ORDER BY position, created_at`,
+    )
+    .all(userId) as Array<Omit<ChatFolder, "chatIds">>;
+  return folders.map((folder) => {
+    const rows =
+      folder.kind === "custom"
+        ? (db
+            .prepare(
+              `SELECT i.chat_id
+               FROM chat_folder_items i
+               JOIN chat_members cm ON cm.chat_id = i.chat_id
+               WHERE i.folder_id = ? AND cm.user_id = ?`,
+            )
+            .all(folder.id, userId) as Array<{ chat_id: string }>)
+        : (db
+            .prepare(
+              `SELECT c.id AS chat_id
+               FROM chats c
+               JOIN chat_members cm ON cm.chat_id = c.id
+               WHERE cm.user_id = ? AND c.type = ?`,
+            )
+            .all(
+              userId,
+              folder.kind === "personal"
+                ? "direct"
+                : folder.kind === "groups"
+                  ? "group"
+                  : "channel",
+            ) as Array<{ chat_id: string }>);
+    return {
+      ...folder,
+      chatIds: rows.map((row) => row.chat_id),
+    };
+  });
+}
+
+function replaceFolderChats(
+  folderId: string,
+  userId: string,
+  chatIds: string[],
+) {
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO chat_folder_items (folder_id, chat_id)
+     SELECT ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?
+     )`,
+  );
+  db.transaction(() => {
+    db.prepare("DELETE FROM chat_folder_items WHERE folder_id = ?").run(folderId);
+    [...new Set(chatIds)].forEach((chatId) =>
+      insert.run(folderId, chatId, chatId, userId),
+    );
+  })();
+}
+
+export function createFolder(
+  userId: string,
+  name: string,
+  chatIds: string[],
+) {
+  const count = db
+    .prepare("SELECT COUNT(*) AS count FROM chat_folders WHERE user_id = ?")
+    .get(userId) as { count: number };
+  if (count.count >= 10) return null;
+  const position = (
+    db
+      .prepare(
+        "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM chat_folders WHERE user_id = ?",
+      )
+      .get(userId) as { position: number }
+  ).position;
+  const id = randomUUID();
+  db.prepare(
+    `INSERT INTO chat_folders
+      (id, user_id, name, kind, position, created_at)
+     VALUES (?, ?, ?, 'custom', ?, ?)`,
+  ).run(id, userId, name.trim(), position, new Date().toISOString());
+  replaceFolderChats(id, userId, chatIds);
+  return listFolders(userId).find((folder) => folder.id === id)!;
+}
+
+export function updateFolder(
+  folderId: string,
+  userId: string,
+  name: string,
+  chatIds: string[],
+) {
+  const result = db.prepare(
+    `UPDATE chat_folders
+     SET name = ?
+     WHERE id = ? AND user_id = ? AND kind = 'custom'`,
+  ).run(name.trim(), folderId, userId);
+  if (!result.changes) return null;
+  replaceFolderChats(folderId, userId, chatIds);
+  return listFolders(userId).find((folder) => folder.id === folderId)!;
+}
+
+export function deleteFolder(folderId: string, userId: string) {
+  return Boolean(
+    db.prepare(
+      `DELETE FROM chat_folders
+       WHERE id = ? AND user_id = ? AND kind = 'custom'`,
+    ).run(folderId, userId).changes,
+  );
+}
+
 function getMembers(chatId: string, presenceLookup: PresenceLookup) {
   const rows = db
     .prepare(
@@ -407,10 +531,12 @@ function chatToSummary(
   return {
     id: chat.id,
     type: chat.type,
+    createdBy: chat.created_by,
+    channelToken: chat.channel_token,
     name:
-      chat.type === "group"
-        ? chat.name ?? "Grupo sem nome"
-        : otherMember?.displayName ?? "Conversa",
+      chat.type === "direct"
+        ? otherMember?.displayName ?? "Conversa"
+        : chat.name ?? (chat.type === "channel" ? "Canal sem nome" : "Grupo sem nome"),
     members,
     lastMessage: getLastMessage(chat.id),
     unreadCount: unread.count,
@@ -524,8 +650,112 @@ export function createGroupChat(
   return getChat(id, currentUserId, presenceLookup);
 }
 
+export function createChannelChat(
+  currentUserId: string,
+  name: string,
+  requestedMemberIds: string[],
+  presenceLookup: PresenceLookup,
+) {
+  const memberIds = [
+    ...new Set([
+      currentUserId,
+      ...requestedMemberIds.filter((id) => Boolean(findUserById(id))),
+    ]),
+  ];
+  const id = randomUUID();
+  const token = randomBytes(12).toString("base64url");
+  const now = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO chats
+        (
+          id,
+          type,
+          name,
+          direct_key,
+          channel_token,
+          created_by,
+          created_at,
+          updated_at
+        )
+       VALUES (?, 'channel', ?, NULL, ?, ?, ?, ?)`,
+    ).run(id, name.trim(), token, currentUserId, now, now);
+    const insertMember = db.prepare(
+      `INSERT INTO chat_members
+        (chat_id, user_id, joined_at, last_read_at)
+       VALUES (?, ?, ?, ?)`,
+    );
+    memberIds.forEach((memberId) =>
+      insertMember.run(id, memberId, now, now),
+    );
+  })();
+  return getChat(id, currentUserId, presenceLookup);
+}
+
+export function joinChannel(
+  token: string,
+  userId: string,
+  presenceLookup: PresenceLookup,
+) {
+  const chat = db
+    .prepare(
+      `SELECT *
+       FROM chats
+       WHERE type = 'channel' AND channel_token = ?`,
+    )
+    .get(token) as ChatRow | undefined;
+  if (!chat) return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT OR IGNORE INTO chat_members
+      (chat_id, user_id, joined_at, last_read_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(chat.id, userId, now, now);
+  return chatToSummary(chat, userId, presenceLookup);
+}
+
+export function addChannelMembers(
+  chatId: string,
+  ownerId: string,
+  memberIds: string[],
+) {
+  const chat = db
+    .prepare(
+      `SELECT *
+       FROM chats
+       WHERE id = ? AND type = 'channel' AND created_by = ?`,
+    )
+    .get(chatId, ownerId) as ChatRow | undefined;
+  if (!chat) return false;
+  const now = new Date().toISOString();
+  const insertMember = db.prepare(
+    `INSERT OR IGNORE INTO chat_members
+      (chat_id, user_id, joined_at, last_read_at)
+     VALUES (?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    memberIds
+      .filter((memberId) => Boolean(findUserById(memberId)))
+      .forEach((memberId) =>
+        insertMember.run(chatId, memberId, now, now),
+      );
+  })();
+  return true;
+}
+
+export function canPostToChat(chatId: string, userId: string) {
+  const chat = db
+    .prepare("SELECT type, created_by FROM chats WHERE id = ?")
+    .get(chatId) as Pick<ChatRow, "type" | "created_by"> | undefined;
+  return Boolean(
+    chat &&
+      isChatMember(chatId, userId) &&
+      (chat.type !== "channel" || chat.created_by === userId),
+  );
+}
+
 export function createMessage(chatId: string, senderId: string, body: string) {
-  if (!isChatMember(chatId, senderId)) return null;
+  if (!canPostToChat(chatId, senderId)) return null;
   const message = {
     id: randomUUID(),
     chatId,

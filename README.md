@@ -72,14 +72,13 @@ Os ticks aparecem apenas nas mensagens enviadas por você:
 | --- | --- |
 | 1 tick | mensagem persistida pelo servidor |
 | 2 ticks | entregue ao destinatário; em grupos, entregue à maioria |
-| 2 ticks verdes | lida; em grupos, lida pela maioria |
+| 2 ticks ciano | lida; em grupos, lida pela maioria |
 
 Cada destinatário tem seu próprio recibo com horários de envio, entrega e
 leitura. O app confirma entrega ao receber ou sincronizar a mensagem e confirma
 leitura quando a conversa é aberta ou volta ao foco. Recibos de leitura ficam
 ativos por padrão neste MVP; o modelo permite adicionar uma preferência de
-privacidade depois. A política de canais futuros já exige entrega a todos os
-inscritos, embora canais ainda não façam parte da interface.
+privacidade depois. Em canais, a entrega exige todos os inscritos.
 
 ## Presença, perfil e identidade
 
@@ -96,16 +95,33 @@ O navegador reporta presença pelo Socket.IO a cada 15 segundos; o servidor
 considera uma conexão ausente após 40 segundos sem heartbeat e agrega várias
 abas/dispositivos do mesmo usuário.
 
-Ao tocar no próprio perfil é possível editar nome de exibição, bio de até 300
-caracteres, avatar e banner. Avatares aceitam JPG, PNG, WebP e GIF até 8 MB, ou
-vídeos MP4/WebM de até 12 MB em loop e sem áudio. Banners aceitam imagens e GIF
-até 8 MB. Os arquivos ficam em `/data/uploads` no mesmo volume persistente do
-SQLite no Railway.
+O perfil saiu da home: acesse **⋯ → Configurações → Configuração de perfil**
+para editar nome de exibição, bio de até 300 caracteres, avatar e banner.
+Avatares aceitam JPG, PNG, WebP e GIF até 8 MB, ou vídeos MP4/WebM de até 12 MB
+em loop e sem áudio. Banners aceitam imagens e GIF até 8 MB. Os arquivos ficam
+em `/data/uploads` no mesmo volume persistente do SQLite no Railway.
 
 Cada conta recebe no cadastro um identificador permanente de 10 caracteres em
-base36 maiúscula (`0-9A-Z`), exibido como `#AB12CD34EF`. O espaço comporta mais
-de 3,6 quadrilhões de combinações; colisões são verificadas no banco e geradas
-novamente. O ID não muda quando o nome é editado e pode ser usado nas buscas.
+base36 maiúscula (`0-9A-Z`). O espaço comporta mais de 3,6 quadrilhões de
+combinações; colisões são verificadas no banco e geradas novamente. Esse ID é
+interno: não aparece na UI, nas buscas ou nos JSONs públicos de perfil.
+
+## Canais e pastas
+
+A home contém somente marca, menu, busca, pastas e lista de conversas. O botão
+`+` fica na barra inferior. O menu `⋯` dá acesso a novo grupo, novo canal e
+Configurações.
+
+Canais são conversas de broadcast: o dono publica e os membros leem. Cada canal
+possui um convite permanente em `/join/<token>`, disponível como link e QR Code.
+O dono pode adicionar pessoas ao criar o canal; qualquer usuário autenticado
+pode entrar pelo convite. A permissão foi isolada no domínio para permitir
+administradores e outras funções depois.
+
+Cada usuário começa com três pastas protegidas e atualizadas automaticamente:
+**Pessoal** para chats 1:1, **Grupos** e **Canais**. É possível criar, renomear,
+editar e remover pastas personalizadas em **Configurações → Conversas**, até o
+limite total de 10. Os chips acima da busca/lista filtram a pasta ativa.
 
 ## Scripts
 

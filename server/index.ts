@@ -11,8 +11,12 @@ import { type PresenceState } from "./presence-types.js";
 import { parsePort, resolveSessionSecret } from "./runtime.js";
 import { SQLiteSessionStore } from "./session-store.js";
 import {
+  addChannelMembers,
   authenticate,
+  canPostToChat,
+  createChannelChat,
   createDirectChat,
+  createFolder,
   createGroupChat,
   createMessage,
   createUser,
@@ -22,7 +26,9 @@ import {
   getContactUserIds,
   getPublicUser,
   isChatMember,
+  joinChannel,
   listChats,
+  listFolders,
   listMessages,
   listUsers,
   markChatDelivered,
@@ -30,6 +36,8 @@ import {
   markMessageDelivered,
   markPendingMessagesDelivered,
   setLastSeen,
+  deleteFolder,
+  updateFolder,
   updateProfile,
   updateProfileMedia,
   type ReceiptUpdate,
@@ -235,6 +243,82 @@ app.get("/api/chats", requireAuth, (req, res) => {
   res.json({ chats: listChats(currentUserId(req), presenceLookup()) });
 });
 
+app.get("/api/folders", requireAuth, (req, res) => {
+  res.json({ folders: listFolders(currentUserId(req)) });
+});
+
+const folderSchema = z.object({
+  name: z.string().trim().min(1).max(24),
+  chatIds: z.array(z.string().uuid()).max(200).default([]),
+});
+
+app.post("/api/folders", requireAuth, (req, res) => {
+  const parsed = folderSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Use um nome de até 24 caracteres." });
+    return;
+  }
+  try {
+    const folder = createFolder(
+      currentUserId(req),
+      parsed.data.name,
+      parsed.data.chatIds,
+    );
+    if (!folder) {
+      res.status(409).json({ error: "Você já chegou ao limite de 10 pastas." });
+      return;
+    }
+    res.status(201).json({ folder });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("UNIQUE constraint failed")
+    ) {
+      res.status(409).json({ error: "Já existe uma pasta com este nome." });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.patch("/api/folders/:folderId", requireAuth, (req, res) => {
+  const parsed = folderSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Confira o nome e as conversas da pasta." });
+    return;
+  }
+  try {
+    const folder = updateFolder(
+      routeParam(req, "folderId"),
+      currentUserId(req),
+      parsed.data.name,
+      parsed.data.chatIds,
+    );
+    if (!folder) {
+      res.status(404).json({ error: "Esta pasta padrão não pode ser editada." });
+      return;
+    }
+    res.json({ folder });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("UNIQUE constraint failed")
+    ) {
+      res.status(409).json({ error: "Já existe uma pasta com este nome." });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.delete("/api/folders/:folderId", requireAuth, (req, res) => {
+  if (!deleteFolder(routeParam(req, "folderId"), currentUserId(req))) {
+    res.status(404).json({ error: "Esta pasta padrão não pode ser removida." });
+    return;
+  }
+  res.status(204).end();
+});
+
 const profileSchema = z.object({
   displayName: z.string().trim().min(2).max(40),
   bio: z.string().trim().max(300),
@@ -383,6 +467,61 @@ app.post("/api/chats/group", requireAuth, (req, res) => {
   res.status(201).json({ chat });
 });
 
+app.post("/api/chats/channel", requireAuth, (req, res) => {
+  const parsed = z
+    .object({
+      name: z.string().trim().min(2).max(50),
+      memberIds: z.array(z.string().uuid()).max(200).default([]),
+    })
+    .safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Dê um nome válido ao canal." });
+    return;
+  }
+  const channel = createChannelChat(
+    currentUserId(req),
+    parsed.data.name,
+    parsed.data.memberIds,
+    presenceLookup(),
+  );
+  emitChatRefresh(channel!.members.map((member) => member.id));
+  res.status(201).json({ chat: channel });
+});
+
+app.post("/api/channels/join/:token", requireAuth, (req, res) => {
+  const token = routeParam(req, "token");
+  if (!/^[A-Za-z0-9_-]{16}$/.test(token)) {
+    res.status(400).json({ error: "Link de canal inválido." });
+    return;
+  }
+  const channel = joinChannel(token, currentUserId(req), presenceLookup());
+  if (!channel) {
+    res.status(404).json({ error: "Este convite não existe mais." });
+    return;
+  }
+  emitChatRefresh(channel.members.map((member) => member.id));
+  res.json({ chat: channel });
+});
+
+app.post("/api/channels/:chatId/members", requireAuth, (req, res) => {
+  const parsed = z
+    .object({ memberIds: z.array(z.string().uuid()).min(1).max(200) })
+    .safeParse(req.body);
+  if (
+    !parsed.success ||
+    !addChannelMembers(
+      routeParam(req, "chatId"),
+      currentUserId(req),
+      parsed.success ? parsed.data.memberIds : [],
+    )
+  ) {
+    res.status(403).json({ error: "Somente o dono pode adicionar membros." });
+    return;
+  }
+  emitChatRefresh(getChatMemberIds(routeParam(req, "chatId")));
+  res.status(204).end();
+});
+
 app.get("/api/chats/:chatId/messages", requireAuth, (req, res) => {
   const chatId = routeParam(req, "chatId");
   const receiptUpdates = markChatDelivered(chatId, currentUserId(req));
@@ -418,8 +557,13 @@ app.post("/api/chats/:chatId/messages", requireAuth, (req, res) => {
     res.status(400).json({ error: "Escreva uma mensagem de até 4.000 caracteres." });
     return;
   }
+  const chatId = routeParam(req, "chatId");
+  if (!canPostToChat(chatId, currentUserId(req))) {
+    res.status(403).json({ error: "Somente o dono pode publicar neste canal." });
+    return;
+  }
   const message = createMessage(
-    routeParam(req, "chatId"),
+    chatId,
     currentUserId(req),
     parsed.data.body,
   );
@@ -427,7 +571,7 @@ app.post("/api/chats/:chatId/messages", requireAuth, (req, res) => {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
   }
-  const memberIds = getChatMemberIds(routeParam(req, "chatId"));
+  const memberIds = getChatMemberIds(chatId);
   memberIds.forEach((memberId) =>
     io.to(`user:${memberId}`).emit("message:new", message),
   );
@@ -516,6 +660,13 @@ io.on("connection", (socket) => {
         .safeParse(payload);
       if (!parsed.success) {
         acknowledge?.({ ok: false, error: "Mensagem inválida." });
+        return;
+      }
+      if (!canPostToChat(parsed.data.chatId, userId)) {
+        acknowledge?.({
+          ok: false,
+          error: "Somente o dono pode publicar neste canal.",
+        });
         return;
       }
       const message = createMessage(

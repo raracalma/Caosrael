@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import Database from "better-sqlite3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { io, type Socket } from "socket.io-client";
 
@@ -49,17 +50,40 @@ async function register(displayName: string) {
   expect(result.response.status).toBe(201);
   const cookie = result.response.headers.get("set-cookie")?.split(";")[0];
   expect(cookie).toBeTruthy();
+  const user = (
+    result.data as {
+      user: Record<string, unknown> & { id: string; displayName: string };
+    }
+  ).user;
+  expect(user).not.toHaveProperty("publicId");
   return {
     cookie: cookie!,
-    user: (
-      result.data as {
-        user: { id: string; publicId: string; displayName: string };
-      }
-    ).user,
+    user,
   };
 }
 
 beforeAll(async () => {
+  const legacyDb = new Database(path.join(dataDirectory, "caoschat.sqlite"));
+  legacyDb.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT
+    );
+    CREATE TABLE chats (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL CHECK (type IN ('direct', 'group')),
+      name TEXT,
+      direct_key TEXT UNIQUE,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  legacyDb.close();
+
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: "production",
@@ -99,9 +123,20 @@ describe("fluxo principal do CaosChat", () => {
 
     const ana = await register("Ana Teste");
     const bia = await register("Bia Teste");
-    expect(ana.user.publicId).toMatch(/^[0-9A-Z]{10}$/);
-    expect(bia.user.publicId).toMatch(/^[0-9A-Z]{10}$/);
-    expect(ana.user.publicId).not.toBe(bia.user.publicId);
+    const inspectionDb = new Database(
+      path.join(dataDirectory, "caoschat.sqlite"),
+      { readonly: true },
+    );
+    const internalIds = inspectionDb
+      .prepare(
+        "SELECT public_id FROM users WHERE id IN (?, ?) ORDER BY public_id",
+      )
+      .all(ana.user.id, bia.user.id) as Array<{ public_id: string }>;
+    inspectionDb.close();
+    expect(internalIds).toHaveLength(2);
+    expect(internalIds[0].public_id).toMatch(/^[0-9A-Z]{10}$/);
+    expect(internalIds[1].public_id).toMatch(/^[0-9A-Z]{10}$/);
+    expect(internalIds[0].public_id).not.toBe(internalIds[1].public_id);
 
     const updatedProfile = await jsonRequest(
       "/api/profile",
@@ -118,14 +153,16 @@ describe("fluxo principal do CaosChat", () => {
     expect(
       (
         updatedProfile.data as {
-          user: { publicId: string; displayName: string; bio: string };
+          user: { displayName: string; bio: string };
         }
       ).user,
     ).toMatchObject({
-      publicId: ana.user.publicId,
       displayName: "Ana Atualizada",
       bio: "Testando presença, perfil e identidade.",
     });
+    expect(
+      (updatedProfile.data as { user: Record<string, unknown> }).user,
+    ).not.toHaveProperty("publicId");
 
     const onePixelPng = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -339,6 +376,134 @@ describe("fluxo principal do CaosChat", () => {
     expect(
       (group.data as { chat: { type: string; members: unknown[] } }).chat,
     ).toMatchObject({ type: "group", members: expect.any(Array) });
+
+    const defaultFolders = await jsonRequest("/api/folders", {}, ana.cookie);
+    expect(
+      (
+        defaultFolders.data as {
+          folders: Array<{ name: string; kind: string }>;
+        }
+      ).folders.map((folder) => [folder.name, folder.kind]),
+    ).toEqual([
+      ["Pessoal", "personal"],
+      ["Grupos", "groups"],
+      ["Canais", "channels"],
+    ]);
+
+    const customFolder = await jsonRequest(
+      "/api/folders",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "Favoritos", chatIds: [chatId] }),
+      },
+      ana.cookie,
+    );
+    expect(customFolder.response.status).toBe(201);
+    const customFolderId = (
+      customFolder.data as { folder: { id: string; chatIds: string[] } }
+    ).folder.id;
+    expect(
+      (customFolder.data as { folder: { chatIds: string[] } }).folder.chatIds,
+    ).toEqual([chatId]);
+
+    const renamedFolder = await jsonRequest(
+      `/api/folders/${customFolderId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ name: "Importantes", chatIds: [chatId] }),
+      },
+      ana.cookie,
+    );
+    expect(renamedFolder.response.status).toBe(200);
+    expect(
+      (renamedFolder.data as { folder: { name: string } }).folder.name,
+    ).toBe("Importantes");
+    expect(
+      (
+        await jsonRequest(
+          `/api/folders/${customFolderId}`,
+          { method: "DELETE" },
+          ana.cookie,
+        )
+      ).response.status,
+    ).toBe(204);
+
+    for (let index = 1; index <= 7; index += 1) {
+      const folder = await jsonRequest(
+        "/api/folders",
+        {
+          method: "POST",
+          body: JSON.stringify({ name: `Pasta ${index}`, chatIds: [] }),
+        },
+        ana.cookie,
+      );
+      expect(folder.response.status).toBe(201);
+    }
+    expect(
+      (
+        await jsonRequest(
+          "/api/folders",
+          {
+            method: "POST",
+            body: JSON.stringify({ name: "Pasta 8", chatIds: [] }),
+          },
+          ana.cookie,
+        )
+      ).response.status,
+    ).toBe(409);
+
+    const clara = await register("Clara Teste");
+    const channelResponse = await jsonRequest(
+      "/api/chats/channel",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: "Canal de teste",
+          memberIds: [bia.user.id],
+        }),
+      },
+      ana.cookie,
+    );
+    expect(channelResponse.response.status).toBe(201);
+    const channel = (
+      channelResponse.data as {
+        chat: { id: string; type: string; channelToken: string };
+      }
+    ).chat;
+    expect(channel).toMatchObject({ type: "channel" });
+    expect(channel.channelToken).toMatch(/^[A-Za-z0-9_-]{16}$/);
+
+    const blockedPost = await jsonRequest(
+      `/api/chats/${channel.id}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({ body: "Membro não pode publicar" }),
+      },
+      bia.cookie,
+    );
+    expect(blockedPost.response.status).toBe(403);
+    expect(
+      (
+        await jsonRequest(
+          `/api/chats/${channel.id}/messages`,
+          {
+            method: "POST",
+            body: JSON.stringify({ body: "Publicação do dono" }),
+          },
+          ana.cookie,
+        )
+      ).response.status,
+    ).toBe(201);
+
+    const joined = await jsonRequest(
+      `/api/channels/join/${channel.channelToken}`,
+      { method: "POST" },
+      clara.cookie,
+    );
+    expect(joined.response.status).toBe(200);
+    expect(
+      (joined.data as { chat: { type: string; members: unknown[] } }).chat,
+    ).toMatchObject({ type: "channel", members: expect.any(Array) });
 
     anaSocket.disconnect();
     biaSocket.disconnect();
