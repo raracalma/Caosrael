@@ -7,6 +7,7 @@ import {
   aggregateDeliveryStatus,
   type ReceiptAwareChatType,
 } from "./delivery-policy.js";
+import { generatePublicId } from "./public-id.js";
 
 export const dataDirectory =
   process.env.DATA_DIR ??
@@ -31,10 +32,16 @@ db.pragma("foreign_keys = ON");
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
+    public_id TEXT UNIQUE,
     display_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    last_seen_at TEXT
+    last_seen_at TEXT,
+    bio TEXT NOT NULL DEFAULT '',
+    avatar_path TEXT,
+    avatar_media_type TEXT,
+    banner_path TEXT,
+    banner_media_type TEXT
   );
 
   CREATE TABLE IF NOT EXISTS chats (
@@ -78,7 +85,23 @@ db.exec(`
 `);
 
 type ColumnInfo = { name: string };
+const userColumns = db.pragma("table_info(users)") as ColumnInfo[];
 const messageColumns = db.pragma("table_info(messages)") as ColumnInfo[];
+
+const missingUserColumns = [
+  ["public_id", "TEXT"],
+  ["bio", "TEXT NOT NULL DEFAULT ''"],
+  ["avatar_path", "TEXT"],
+  ["avatar_media_type", "TEXT"],
+  ["banner_path", "TEXT"],
+  ["banner_media_type", "TEXT"],
+] as const;
+
+for (const [name, definition] of missingUserColumns) {
+  if (!userColumns.some((column) => column.name === name)) {
+    db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition};`);
+  }
+}
 
 if (!messageColumns.some((column) => column.name === "delivery_status")) {
   db.exec(`
@@ -221,6 +244,34 @@ function seedDemoData() {
   seed();
 }
 
+function backfillPublicIds() {
+  const rows = db
+    .prepare("SELECT id, public_id FROM users")
+    .all() as Array<{ id: string; public_id: string | null }>;
+  const usedIds = new Set(
+    rows
+      .map((row) => row.public_id)
+      .filter((publicId): publicId is string => Boolean(publicId)),
+  );
+  const update = db.prepare(
+    "UPDATE users SET public_id = ? WHERE id = ? AND public_id IS NULL",
+  );
+
+  db.transaction(() => {
+    rows
+      .filter((row) => !row.public_id)
+      .forEach((row) => {
+        let publicId = generatePublicId();
+        while (usedIds.has(publicId)) publicId = generatePublicId();
+        update.run(publicId, row.id);
+        usedIds.add(publicId);
+      });
+    db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_public_id ON users(public_id);",
+    );
+  })();
+}
+
 function backfillMessageReceipts() {
   const backfill = db.transaction(() => {
     db.exec(`
@@ -311,4 +362,5 @@ function backfillMessageReceipts() {
 }
 
 seedDemoData();
+backfillPublicIds();
 backfillMessageReceipts();

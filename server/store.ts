@@ -7,13 +7,24 @@ import {
   type ReceiptAwareChatType,
   type ReceiptProgress,
 } from "./delivery-policy.js";
+import {
+  type PresenceLookup,
+  type PresenceSnapshot,
+} from "./presence-types.js";
+import { generatePublicId } from "./public-id.js";
 
 type UserRow = {
   id: string;
+  public_id: string;
   display_name: string;
   password_hash: string;
   created_at: string;
   last_seen_at: string | null;
+  bio: string;
+  avatar_path: string | null;
+  avatar_media_type: string | null;
+  banner_path: string | null;
+  banner_media_type: string | null;
 };
 
 type ChatRow = {
@@ -38,9 +49,17 @@ type MessageRow = {
 
 export type PublicUser = {
   id: string;
+  publicId: string;
   displayName: string;
   lastSeenAt: string | null;
   online: boolean;
+  presenceState: PresenceSnapshot["state"];
+  activeChatId: string | null;
+  bio: string;
+  avatarUrl: string | null;
+  avatarMediaType: string | null;
+  bannerUrl: string | null;
+  bannerMediaType: string | null;
 };
 
 export type Message = {
@@ -74,12 +93,24 @@ export type ChatSummary = {
   updatedAt: string;
 };
 
-function mapUser(row: UserRow, onlineIds = new Set<string>()): PublicUser {
+function mapUser(
+  row: UserRow,
+  presenceLookup: PresenceLookup = new Map(),
+): PublicUser {
+  const presence = presenceLookup.get(row.id);
   return {
     id: row.id,
+    publicId: row.public_id,
     displayName: row.display_name,
-    lastSeenAt: row.last_seen_at,
-    online: onlineIds.has(row.id),
+    lastSeenAt: presence?.lastSeenAt ?? row.last_seen_at,
+    online: Boolean(presence && presence.state !== "away"),
+    presenceState: presence?.state ?? "away",
+    activeChatId: presence?.chatId ?? null,
+    bio: row.bio,
+    avatarUrl: row.avatar_path,
+    avatarMediaType: row.avatar_media_type,
+    bannerUrl: row.banner_path,
+    bannerMediaType: row.banner_media_type,
   };
 }
 
@@ -182,6 +213,20 @@ export function findUserByName(displayName: string) {
     .get(displayName) as UserRow | undefined;
 }
 
+export function findUserByPublicId(publicId: string) {
+  return db
+    .prepare("SELECT * FROM users WHERE public_id = ? COLLATE NOCASE")
+    .get(publicId.replace(/^[#@]/, "").trim()) as UserRow | undefined;
+}
+
+export function getPublicUser(
+  userId: string,
+  presenceLookup: PresenceLookup = new Map(),
+) {
+  const user = findUserById(userId);
+  return user ? mapUser(user, presenceLookup) : null;
+}
+
 export function authenticate(displayName: string, password: string) {
   const user = findUserByName(displayName.trim());
   if (!user || !bcrypt.compareSync(password, user.password_hash)) return null;
@@ -191,21 +236,95 @@ export function authenticate(displayName: string, password: string) {
 export function createUser(displayName: string, password: string) {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
-  db.prepare(
+  const insert = db.prepare(
     `INSERT INTO users
-      (id, display_name, password_hash, created_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(id, displayName.trim(), bcrypt.hashSync(password, 10), createdAt, createdAt);
-  return mapUser(findUserById(id)!);
+      (
+        id,
+        public_id,
+        display_name,
+        password_hash,
+        created_at,
+        last_seen_at
+      )
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const passwordHash = bcrypt.hashSync(password, 10);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      insert.run(
+        id,
+        generatePublicId(),
+        displayName.trim(),
+        passwordHash,
+        createdAt,
+        createdAt,
+      );
+      return mapUser(findUserById(id)!);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("users.public_id")
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("Não foi possível gerar um identificador público único.");
 }
 
-export function listUsers(currentUserId: string, onlineIds: Set<string>) {
+export function updateProfile(
+  userId: string,
+  displayName: string,
+  bio: string,
+) {
+  db.prepare(
+    `UPDATE users
+     SET display_name = ?, bio = ?
+     WHERE id = ?`,
+  ).run(displayName.trim(), bio.trim(), userId);
+  return mapUser(findUserById(userId)!);
+}
+
+export function updateProfileMedia(
+  userId: string,
+  values: {
+    avatarPath?: string;
+    avatarMediaType?: string;
+    bannerPath?: string;
+    bannerMediaType?: string;
+  },
+) {
+  const current = findUserById(userId);
+  if (!current) return null;
+  db.prepare(
+    `UPDATE users
+     SET
+       avatar_path = ?,
+       avatar_media_type = ?,
+       banner_path = ?,
+       banner_media_type = ?
+     WHERE id = ?`,
+  ).run(
+    values.avatarPath ?? current.avatar_path,
+    values.avatarMediaType ?? current.avatar_media_type,
+    values.bannerPath ?? current.banner_path,
+    values.bannerMediaType ?? current.banner_media_type,
+    userId,
+  );
+  return mapUser(findUserById(userId)!);
+}
+
+export function listUsers(
+  currentUserId: string,
+  presenceLookup: PresenceLookup,
+) {
   const rows = db
     .prepare(
       "SELECT * FROM users WHERE id != ? ORDER BY display_name COLLATE NOCASE",
     )
     .all(currentUserId) as UserRow[];
-  return rows.map((row) => mapUser(row, onlineIds));
+  return rows.map((row) => mapUser(row, presenceLookup));
 }
 
 export function setLastSeen(userId: string, value = new Date().toISOString()) {
@@ -227,7 +346,19 @@ export function getChatMemberIds(chatId: string) {
   return rows.map((row) => row.user_id);
 }
 
-function getMembers(chatId: string, onlineIds: Set<string>) {
+export function getContactUserIds(userId: string) {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT other.user_id
+       FROM chat_members mine
+       JOIN chat_members other ON other.chat_id = mine.chat_id
+       WHERE mine.user_id = ? AND other.user_id != ?`,
+    )
+    .all(userId, userId) as Array<{ user_id: string }>;
+  return rows.map((row) => row.user_id);
+}
+
+function getMembers(chatId: string, presenceLookup: PresenceLookup) {
   const rows = db
     .prepare(
       `SELECT u.*
@@ -237,7 +368,7 @@ function getMembers(chatId: string, onlineIds: Set<string>) {
        ORDER BY u.display_name COLLATE NOCASE`,
     )
     .all(chatId) as UserRow[];
-  return rows.map((row) => mapUser(row, onlineIds));
+  return rows.map((row) => mapUser(row, presenceLookup));
 }
 
 function getLastMessage(chatId: string) {
@@ -257,9 +388,9 @@ function getLastMessage(chatId: string) {
 function chatToSummary(
   chat: ChatRow,
   currentUserId: string,
-  onlineIds: Set<string>,
+  presenceLookup: PresenceLookup,
 ): ChatSummary {
-  const members = getMembers(chat.id, onlineIds);
+  const members = getMembers(chat.id, presenceLookup);
   const otherMember = members.find((member) => member.id !== currentUserId);
   const unread = db
     .prepare(
@@ -287,7 +418,7 @@ function chatToSummary(
   };
 }
 
-export function listChats(userId: string, onlineIds: Set<string>) {
+export function listChats(userId: string, presenceLookup: PresenceLookup) {
   const rows = db
     .prepare(
       `SELECT c.*
@@ -297,19 +428,19 @@ export function listChats(userId: string, onlineIds: Set<string>) {
        ORDER BY c.updated_at DESC`,
     )
     .all(userId) as ChatRow[];
-  return rows.map((row) => chatToSummary(row, userId, onlineIds));
+  return rows.map((row) => chatToSummary(row, userId, presenceLookup));
 }
 
 export function getChat(
   chatId: string,
   userId: string,
-  onlineIds: Set<string>,
+  presenceLookup: PresenceLookup,
 ) {
   if (!isChatMember(chatId, userId)) return null;
   const row = db.prepare("SELECT * FROM chats WHERE id = ?").get(chatId) as
     | ChatRow
     | undefined;
-  return row ? chatToSummary(row, userId, onlineIds) : null;
+  return row ? chatToSummary(row, userId, presenceLookup) : null;
 }
 
 export function listMessages(chatId: string, userId: string) {
@@ -330,7 +461,7 @@ export function listMessages(chatId: string, userId: string) {
 export function createDirectChat(
   currentUserId: string,
   otherUserId: string,
-  onlineIds: Set<string>,
+  presenceLookup: PresenceLookup,
 ) {
   if (currentUserId === otherUserId || !findUserById(otherUserId)) return null;
   const directKey = [currentUserId, otherUserId].sort().join(":");
@@ -338,7 +469,7 @@ export function createDirectChat(
     .prepare("SELECT * FROM chats WHERE direct_key = ?")
     .get(directKey) as ChatRow | undefined;
 
-  if (existing) return chatToSummary(existing, currentUserId, onlineIds);
+  if (existing) return chatToSummary(existing, currentUserId, presenceLookup);
 
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -356,14 +487,14 @@ export function createDirectChat(
     insertMember.run(id, currentUserId, now, now);
     insertMember.run(id, otherUserId, now, now);
   })();
-  return getChat(id, currentUserId, onlineIds);
+  return getChat(id, currentUserId, presenceLookup);
 }
 
 export function createGroupChat(
   currentUserId: string,
   name: string,
   requestedMemberIds: string[],
-  onlineIds: Set<string>,
+  presenceLookup: PresenceLookup,
 ) {
   const memberIds = [
     ...new Set([
@@ -390,7 +521,7 @@ export function createGroupChat(
       insertMember.run(id, memberId, now, now),
     );
   })();
-  return getChat(id, currentUserId, onlineIds);
+  return getChat(id, currentUserId, presenceLookup);
 }
 
 export function createMessage(chatId: string, senderId: string, body: string) {

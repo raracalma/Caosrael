@@ -1,12 +1,15 @@
 import type { Chat, Message, User } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const isFormData = options?.body instanceof FormData;
   const response = await fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
+    headers: isFormData
+      ? options?.headers
+      : {
+          "Content-Type": "application/json",
+          ...options?.headers,
+        },
   });
 
   if (!response.ok) {
@@ -34,6 +37,22 @@ export const api = {
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   users: () => request<{ users: User[] }>("/api/users"),
+  profile: (userId: string) =>
+    request<{ user: User }>(`/api/users/${userId}/profile`),
+  updateProfile: (displayName: string, bio: string) =>
+    request<{ user: User }>("/api/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ displayName, bio }),
+    }),
+  uploadProfileMedia: (avatar?: File, banner?: File) => {
+    const form = new FormData();
+    if (avatar) form.append("avatar", avatar);
+    if (banner) form.append("banner", banner);
+    return request<{ user: User }>("/api/profile/media", {
+      method: "POST",
+      body: form,
+    });
+  },
   chats: () => request<{ chats: Chat[] }>("/api/chats"),
   messages: (chatId: string) =>
     request<{ messages: Message[] }>(`/api/chats/${chatId}/messages`),

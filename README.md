@@ -81,6 +81,32 @@ ativos por padrão neste MVP; o modelo permite adicionar uma preferência de
 privacidade depois. A política de canais futuros já exige entrega a todos os
 inscritos, embora canais ainda não façam parte da interface.
 
+## Presença, perfil e identidade
+
+Os pontos de presença lembram mensageiros clássicos, sem se confundirem com os
+ticks ciano:
+
+| Cor | Significado |
+| --- | --- |
+| Verde | a pessoa está com esta conversa aberta e em foco |
+| Amarelo | o CaosChat está aberto, mas em outra tela ou conversa |
+| Vermelho | app em segundo plano, fechado ou sem heartbeat |
+
+O navegador reporta presença pelo Socket.IO a cada 15 segundos; o servidor
+considera uma conexão ausente após 40 segundos sem heartbeat e agrega várias
+abas/dispositivos do mesmo usuário.
+
+Ao tocar no próprio perfil é possível editar nome de exibição, bio de até 300
+caracteres, avatar e banner. Avatares aceitam JPG, PNG, WebP e GIF até 8 MB, ou
+vídeos MP4/WebM de até 12 MB em loop e sem áudio. Banners aceitam imagens e GIF
+até 8 MB. Os arquivos ficam em `/data/uploads` no mesmo volume persistente do
+SQLite no Railway.
+
+Cada conta recebe no cadastro um identificador permanente de 10 caracteres em
+base36 maiúscula (`0-9A-Z`), exibido como `#AB12CD34EF`. O espaço comporta mais
+de 3,6 quadrilhões de combinações; colisões são verificadas no banco e geradas
+novamente. O ID não muda quando o nome é editado e pode ser usado nas buscas.
+
 ## Scripts
 
 ```bash

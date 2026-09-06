@@ -1,8 +1,16 @@
 export type User = {
   id: string;
+  publicId: string;
   displayName: string;
   lastSeenAt: string | null;
   online: boolean;
+  presenceState: "in_chat" | "app" | "away";
+  activeChatId: string | null;
+  bio: string;
+  avatarUrl: string | null;
+  avatarMediaType: string | null;
+  bannerUrl: string | null;
+  bannerMediaType: string | null;
 };
 
 export type Message = {

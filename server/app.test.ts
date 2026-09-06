@@ -51,7 +51,11 @@ async function register(displayName: string) {
   expect(cookie).toBeTruthy();
   return {
     cookie: cookie!,
-    user: (result.data as { user: { id: string; displayName: string } }).user,
+    user: (
+      result.data as {
+        user: { id: string; publicId: string; displayName: string };
+      }
+    ).user,
   };
 }
 
@@ -95,6 +99,76 @@ describe("fluxo principal do CaosChat", () => {
 
     const ana = await register("Ana Teste");
     const bia = await register("Bia Teste");
+    expect(ana.user.publicId).toMatch(/^[0-9A-Z]{10}$/);
+    expect(bia.user.publicId).toMatch(/^[0-9A-Z]{10}$/);
+    expect(ana.user.publicId).not.toBe(bia.user.publicId);
+
+    const updatedProfile = await jsonRequest(
+      "/api/profile",
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          displayName: "Ana Atualizada",
+          bio: "Testando presença, perfil e identidade.",
+        }),
+      },
+      ana.cookie,
+    );
+    expect(updatedProfile.response.status).toBe(200);
+    expect(
+      (
+        updatedProfile.data as {
+          user: { publicId: string; displayName: string; bio: string };
+        }
+      ).user,
+    ).toMatchObject({
+      publicId: ana.user.publicId,
+      displayName: "Ana Atualizada",
+      bio: "Testando presença, perfil e identidade.",
+    });
+
+    const onePixelPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const profileMedia = new FormData();
+    profileMedia.append(
+      "avatar",
+      new Blob([onePixelPng], { type: "image/png" }),
+      "avatar.png",
+    );
+    profileMedia.append(
+      "banner",
+      new Blob([onePixelPng], { type: "image/png" }),
+      "banner.png",
+    );
+    const mediaResponse = await fetch(`${baseUrl}/api/profile/media`, {
+      method: "POST",
+      headers: { Cookie: ana.cookie },
+      body: profileMedia,
+    });
+    expect(mediaResponse.status).toBe(200);
+    const mediaUser = (await mediaResponse.json()) as {
+      user: {
+        avatarUrl: string;
+        avatarMediaType: string;
+        bannerUrl: string;
+        bannerMediaType: string;
+      };
+    };
+    expect(mediaUser.user).toMatchObject({
+      avatarMediaType: "image/png",
+      bannerMediaType: "image/png",
+    });
+    expect(mediaUser.user.avatarUrl).toMatch(/^\/uploads\/avatar-/);
+    expect(mediaUser.user.bannerUrl).toMatch(/^\/uploads\/banner-/);
+    expect(
+      (
+        await fetch(`${baseUrl}${mediaUser.user.avatarUrl}`, {
+          headers: { Cookie: ana.cookie },
+        })
+      ).status,
+    ).toBe(200);
 
     const direct = await jsonRequest(
       "/api/chats/direct",
@@ -122,6 +196,47 @@ describe("fluxo principal do CaosChat", () => {
       connectSocket(ana.cookie),
       connectSocket(bia.cookie),
     ]);
+
+    const inChatPresence = new Promise<{
+      userId: string;
+      state: string;
+      chatId: string;
+    }>((resolve) => {
+      const listener = (presence: {
+        userId: string;
+        state: string;
+        chatId: string;
+      }) => {
+        if (presence.userId === bia.user.id && presence.state === "in_chat") {
+          anaSocket.off("presence:changed", listener);
+          resolve(presence);
+        }
+      };
+      anaSocket.on("presence:changed", listener);
+    });
+    biaSocket.emit("presence:report", { state: "in_chat", chatId });
+    await expect(inChatPresence).resolves.toMatchObject({
+      userId: bia.user.id,
+      state: "in_chat",
+      chatId,
+    });
+
+    const appPresence = new Promise<{ userId: string; state: string }>(
+      (resolve) => {
+        const listener = (presence: { userId: string; state: string }) => {
+          if (presence.userId === bia.user.id && presence.state === "app") {
+            anaSocket.off("presence:changed", listener);
+            resolve(presence);
+          }
+        };
+        anaSocket.on("presence:changed", listener);
+      },
+    );
+    biaSocket.emit("presence:report", { state: "app" });
+    await expect(appPresence).resolves.toMatchObject({
+      userId: bia.user.id,
+      state: "app",
+    });
 
     const received = new Promise<{
       id: string;
