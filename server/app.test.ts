@@ -90,7 +90,7 @@ afterAll(() => {
 });
 
 describe("fluxo principal do CaosChat", () => {
-  it("registra duas contas, cria chats e entrega mensagem em tempo real", async () => {
+  it("percorre sent → delivered → read entre duas contas", async () => {
     expect(existsSync(path.join(dataDirectory, ".session-secret"))).toBe(true);
 
     const ana = await register("Ana Teste");
@@ -107,16 +107,28 @@ describe("fluxo principal do CaosChat", () => {
     expect(direct.response.status).toBe(201);
     const chatId = (direct.data as { chat: { id: string } }).chat.id;
 
-    const biaSocket: Socket = io(baseUrl, {
-      extraHeaders: { Cookie: bia.cookie },
-      transports: ["websocket"],
-    });
-    await new Promise<void>((resolve, reject) => {
-      biaSocket.once("connect", () => resolve());
-      biaSocket.once("connect_error", reject);
-    });
+    const connectSocket = async (cookie: string) => {
+      const socket: Socket = io(baseUrl, {
+        extraHeaders: { Cookie: cookie },
+        transports: ["websocket"],
+      });
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", () => resolve());
+        socket.once("connect_error", reject);
+      });
+      return socket;
+    };
+    const [anaSocket, biaSocket] = await Promise.all([
+      connectSocket(ana.cookie),
+      connectSocket(bia.cookie),
+    ]);
 
-    const delivered = new Promise<{ body: string; chatId: string }>((resolve) => {
+    const received = new Promise<{
+      id: string;
+      body: string;
+      chatId: string;
+      deliveryStatus: string;
+    }>((resolve) => {
       biaSocket.once("message:new", resolve);
     });
     const sent = await jsonRequest(
@@ -128,16 +140,74 @@ describe("fluxo principal do CaosChat", () => {
       ana.cookie,
     );
     expect(sent.response.status).toBe(201);
-    await expect(delivered).resolves.toMatchObject({
+    expect(
+      (sent.data as { message: { deliveryStatus: string } }).message
+        .deliveryStatus,
+    ).toBe("sent");
+    const receivedMessage = await received;
+    expect(receivedMessage).toMatchObject({
       chatId,
       body: "Mensagem ao vivo",
+      deliveryStatus: "sent",
     });
+
+    const deliveredReceipt = new Promise<{
+      messageId: string;
+      deliveryStatus: string;
+    }>((resolve) => {
+      anaSocket.once("receipt:updated", resolve);
+    });
+    biaSocket.emit("message:delivered", receivedMessage.id);
+    await expect(deliveredReceipt).resolves.toMatchObject({
+      messageId: receivedMessage.id,
+      deliveryStatus: "delivered",
+    });
+
+    const afterDelivery = await jsonRequest(
+      `/api/chats/${chatId}/messages`,
+      {},
+      ana.cookie,
+    );
+    expect(
+      (
+        afterDelivery.data as {
+          messages: Array<{ id: string; deliveryStatus: string }>;
+        }
+      ).messages.find((message) => message.id === receivedMessage.id)
+        ?.deliveryStatus,
+    ).toBe("delivered");
 
     const biaChats = await jsonRequest("/api/chats", {}, bia.cookie);
     expect(
       (biaChats.data as { chats: Array<{ unreadCount: number }> }).chats[0]
         .unreadCount,
     ).toBe(1);
+
+    const readReceipt = new Promise<{
+      messageId: string;
+      deliveryStatus: string;
+    }>((resolve) => {
+      anaSocket.once("receipt:updated", resolve);
+    });
+    biaSocket.emit("chat:read", chatId);
+    await expect(readReceipt).resolves.toMatchObject({
+      messageId: receivedMessage.id,
+      deliveryStatus: "read",
+    });
+
+    const afterRead = await jsonRequest(
+      `/api/chats/${chatId}/messages`,
+      {},
+      ana.cookie,
+    );
+    expect(
+      (
+        afterRead.data as {
+          messages: Array<{ id: string; deliveryStatus: string }>;
+        }
+      ).messages.find((message) => message.id === receivedMessage.id)
+        ?.deliveryStatus,
+    ).toBe("read");
 
     const group = await jsonRequest(
       "/api/chats/group",
@@ -155,6 +225,7 @@ describe("fluxo principal do CaosChat", () => {
       (group.data as { chat: { type: string; members: unknown[] } }).chat,
     ).toMatchObject({ type: "group", members: expect.any(Array) });
 
+    anaSocket.disconnect();
     biaSocket.disconnect();
   });
 });

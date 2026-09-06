@@ -19,8 +19,12 @@ import {
   listChats,
   listMessages,
   listUsers,
+  markChatDelivered,
   markChatRead,
+  markMessageDelivered,
+  markPendingMessagesDelivered,
   setLastSeen,
+  type ReceiptUpdate,
 } from "./store.js";
 
 declare module "express-session" {
@@ -104,6 +108,12 @@ function publicCurrentUser(userId: string) {
 function emitChatRefresh(memberIds: string[]) {
   memberIds.forEach((memberId) => {
     io.to(`user:${memberId}`).emit("chats:refresh");
+  });
+}
+
+function emitReceiptUpdates(updates: ReceiptUpdate[]) {
+  updates.forEach((update) => {
+    io.to(`user:${update.senderId}`).emit("receipt:updated", update);
   });
 }
 
@@ -230,19 +240,27 @@ app.post("/api/chats/group", requireAuth, (req, res) => {
 });
 
 app.get("/api/chats/:chatId/messages", requireAuth, (req, res) => {
-  const messages = listMessages(routeParam(req, "chatId"), currentUserId(req));
-  if (!messages) {
+  const chatId = routeParam(req, "chatId");
+  const receiptUpdates = markChatDelivered(chatId, currentUserId(req));
+  if (!receiptUpdates) {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
   }
+  emitReceiptUpdates(receiptUpdates);
+  const messages = listMessages(chatId, currentUserId(req))!;
   res.json({ messages });
 });
 
 app.post("/api/chats/:chatId/read", requireAuth, (req, res) => {
-  if (!markChatRead(routeParam(req, "chatId"), currentUserId(req))) {
+  const receiptUpdates = markChatRead(
+    routeParam(req, "chatId"),
+    currentUserId(req),
+  );
+  if (!receiptUpdates) {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
   }
+  emitReceiptUpdates(receiptUpdates);
   res.status(204).end();
 });
 
@@ -334,9 +352,42 @@ io.on("connection", (socket) => {
     },
   );
 
-  socket.on("chat:read", (chatId: string) => {
-    if (typeof chatId === "string") markChatRead(chatId, userId);
-  });
+  socket.on(
+    "message:delivered",
+    (
+      messageId: string,
+      acknowledge?: (result: { ok: boolean }) => void,
+    ) => {
+      const parsed = z.string().uuid().safeParse(messageId);
+      const update = parsed.success
+        ? markMessageDelivered(parsed.data, userId)
+        : null;
+      if (update) emitReceiptUpdates([update]);
+      acknowledge?.({ ok: Boolean(update) });
+    },
+  );
+
+  socket.on(
+    "receipts:sync",
+    (acknowledge?: (result: { updated: number }) => void) => {
+      const updates = markPendingMessagesDelivered(userId);
+      emitReceiptUpdates(updates);
+      acknowledge?.({ updated: updates.length });
+    },
+  );
+
+  socket.on(
+    "chat:read",
+    (
+      chatId: string,
+      acknowledge?: (result: { ok: boolean }) => void,
+    ) => {
+      const updates =
+        typeof chatId === "string" ? markChatRead(chatId, userId) : null;
+      if (updates) emitReceiptUpdates(updates);
+      acknowledge?.({ ok: updates !== null });
+    },
+  );
 
   socket.on("disconnect", () => {
     const remaining = (onlineConnections.get(userId) ?? 1) - 1;
