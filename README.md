@@ -31,9 +31,9 @@ npm run dev
 Abra [http://localhost:5173](http://localhost:5173). A interface roda na porta
 `5173` e a API na porta `3001`; o Vite encaminha as chamadas automaticamente.
 
-O banco SQLite é criado em `data/caoschat.sqlite` e as sessões em
-`data/sessions.sqlite`. Para recomeçar a demonstração do zero, pare o servidor,
-apague a pasta `data/` e execute `npm run dev` novamente.
+O banco SQLite é criado em `data/caoschat.sqlite`, incluindo as sessões
+persistentes. Para recomeçar a demonstração do zero, pare o servidor, apague a
+pasta `data/` e execute `npm run dev` novamente.
 
 ## Testar com duas pessoas
 

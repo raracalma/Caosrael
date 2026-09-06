@@ -2,9 +2,9 @@ import path from "node:path";
 import http from "node:http";
 import express, { type NextFunction, type Request, type Response } from "express";
 import session from "express-session";
-import connectSqlite3 from "connect-sqlite3";
 import { Server } from "socket.io";
 import { z } from "zod";
+import { SQLiteSessionStore } from "./session-store.js";
 import {
   authenticate,
   createDirectChat,
@@ -31,14 +31,9 @@ const port = Number(process.env.PORT ?? 3001);
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const SQLiteStore = connectSqlite3(session);
-const dataDirectory = path.join(process.cwd(), "data");
 
 const sessionMiddleware = session({
-  store: new SQLiteStore({
-    db: "sessions.sqlite",
-    dir: dataDirectory,
-  }),
+  store: new SQLiteSessionStore(),
   secret: process.env.SESSION_SECRET ?? "caoschat-dev-change-in-production",
   resave: false,
   saveUninitialized: false,
@@ -71,6 +66,11 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
 
 function currentUserId(req: Request) {
   return (req as AuthedRequest).session.userId!;
+}
+
+function routeParam(req: Request, name: string) {
+  const value = req.params[name];
+  return Array.isArray(value) ? (value[0] ?? "") : value;
 }
 
 function publicCurrentUser(userId: string) {
@@ -212,7 +212,7 @@ app.post("/api/chats/group", requireAuth, (req, res) => {
 });
 
 app.get("/api/chats/:chatId/messages", requireAuth, (req, res) => {
-  const messages = listMessages(req.params.chatId, currentUserId(req));
+  const messages = listMessages(routeParam(req, "chatId"), currentUserId(req));
   if (!messages) {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
@@ -221,7 +221,7 @@ app.get("/api/chats/:chatId/messages", requireAuth, (req, res) => {
 });
 
 app.post("/api/chats/:chatId/read", requireAuth, (req, res) => {
-  if (!markChatRead(req.params.chatId, currentUserId(req))) {
+  if (!markChatRead(routeParam(req, "chatId"), currentUserId(req))) {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
   }
@@ -239,7 +239,7 @@ app.post("/api/chats/:chatId/messages", requireAuth, (req, res) => {
     return;
   }
   const message = createMessage(
-    req.params.chatId,
+    routeParam(req, "chatId"),
     currentUserId(req),
     parsed.data.body,
   );
@@ -247,7 +247,7 @@ app.post("/api/chats/:chatId/messages", requireAuth, (req, res) => {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
   }
-  const memberIds = getChatMemberIds(req.params.chatId);
+  const memberIds = getChatMemberIds(routeParam(req, "chatId"));
   memberIds.forEach((memberId) =>
     io.to(`user:${memberId}`).emit("message:new", message),
   );
@@ -256,7 +256,11 @@ app.post("/api/chats/:chatId/messages", requireAuth, (req, res) => {
 });
 
 app.get("/api/chats/:chatId", requireAuth, (req, res) => {
-  const chat = getChat(req.params.chatId, currentUserId(req), onlineIds());
+  const chat = getChat(
+    routeParam(req, "chatId"),
+    currentUserId(req),
+    onlineIds(),
+  );
   if (!chat) {
     res.status(404).json({ error: "Conversa não encontrada." });
     return;
