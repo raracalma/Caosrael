@@ -966,11 +966,9 @@ function SettingsScreen({
                   type="button"
                   className="button folder-editor__delete"
                   onClick={() => {
-                    if (editing !== "new") {
-                      void onDeleteFolder(editing.id).then(() =>
-                        setEditing(null),
-                      );
-                    }
+                    void onDeleteFolder(editing.id).then(() =>
+                      setEditing(null),
+                    );
                   }}
                 >
                   Remover
