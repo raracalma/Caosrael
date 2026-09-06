@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   Check,
+  CheckCheck,
   ChevronRight,
   LogOut,
   MessageCircleMore,
@@ -15,7 +16,7 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import { api } from "./api";
-import type { Chat, Message, User } from "./types";
+import type { Chat, Message, ReceiptUpdate, User } from "./types";
 
 function initials(name: string) {
   return name
@@ -266,6 +267,30 @@ function formatMessageTime(value: string) {
   }).format(new Date(value));
 }
 
+function MessageTicks({ message }: { message: Message }) {
+  const read = message.deliveryStatus === "read";
+  const delivered = message.deliveryStatus === "delivered";
+  const label = read
+    ? `Lida por ${message.receiptSummary.read} de ${message.receiptSummary.total}`
+    : delivered
+      ? `Entregue a ${message.receiptSummary.delivered} de ${message.receiptSummary.total}`
+      : "Enviada ao servidor";
+
+  return (
+    <span
+      className={`message-ticks message-ticks--${message.deliveryStatus}`}
+      aria-label={label}
+      title={label}
+    >
+      {delivered || read ? (
+        <CheckCheck size={15} strokeWidth={2.4} />
+      ) : (
+        <Check size={14} strokeWidth={2.4} />
+      )}
+    </span>
+  );
+}
+
 function formatDay(value: string) {
   const date = new Date(value);
   const now = new Date();
@@ -510,7 +535,11 @@ function Messenger({
 
     const socket = io();
     socketRef.current = socket;
+    socket.on("connect", () => socket.emit("receipts:sync"));
     socket.on("message:new", (message: Message) => {
+      if (message.senderId !== currentUser.id) {
+        socket.emit("message:delivered", message.id);
+      }
       if (message.chatId === selectedChatRef.current) {
         setMessages((current) =>
           current.some((item) => item.id === message.id)
@@ -519,6 +548,25 @@ function Messenger({
         );
         socket.emit("chat:read", message.chatId);
       }
+    });
+    socket.on("receipt:updated", (receipt: ReceiptUpdate) => {
+      const applyReceipt = (message: Message) =>
+        message.id === receipt.messageId
+          ? {
+              ...message,
+              deliveryStatus: receipt.deliveryStatus,
+              statusUpdatedAt: receipt.statusUpdatedAt,
+              receiptSummary: receipt.receiptSummary,
+            }
+          : message;
+      setMessages((current) => current.map(applyReceipt));
+      setChats((current) =>
+        current.map((chat) =>
+          chat.lastMessage?.id === receipt.messageId
+            ? { ...chat, lastMessage: applyReceipt(chat.lastMessage) }
+            : chat,
+        ),
+      );
     });
     socket.on("chats:refresh", () => void loadChats());
     socket.on(
@@ -543,6 +591,22 @@ function Messenger({
     );
     return () => {
       socket.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const markReadWhenFocused = () => {
+      if (document.visibilityState !== "visible") return;
+      const chatId = selectedChatRef.current;
+      if (chatId && socketRef.current?.connected) {
+        socketRef.current.emit("chat:read", chatId);
+      }
+    };
+    window.addEventListener("focus", markReadWhenFocused);
+    document.addEventListener("visibilitychange", markReadWhenFocused);
+    return () => {
+      window.removeEventListener("focus", markReadWhenFocused);
+      document.removeEventListener("visibilitychange", markReadWhenFocused);
     };
   }, []);
 
@@ -805,7 +869,7 @@ function Messenger({
                           <span>{message.body}</span>
                           <time>
                             {formatMessageTime(message.createdAt)}
-                            {sent && <Check size={13} />}
+                            {sent && <MessageTicks message={message} />}
                           </time>
                         </div>
                       </div>

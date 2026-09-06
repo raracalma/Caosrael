@@ -64,6 +64,23 @@ Na primeira execução, estas contas são criadas:
 Também é possível criar contas próprias. Os nomes de exibição são únicos e
 funcionam como identificação para login neste MVP.
 
+## Ticks das mensagens
+
+Os ticks aparecem apenas nas mensagens enviadas por você:
+
+| Indicador | Estado |
+| --- | --- |
+| 1 tick | mensagem persistida pelo servidor |
+| 2 ticks | entregue ao destinatário; em grupos, entregue à maioria |
+| 2 ticks verdes | lida; em grupos, lida pela maioria |
+
+Cada destinatário tem seu próprio recibo com horários de envio, entrega e
+leitura. O app confirma entrega ao receber ou sincronizar a mensagem e confirma
+leitura quando a conversa é aberta ou volta ao foco. Recibos de leitura ficam
+ativos por padrão neste MVP; o modelo permite adicionar uma preferência de
+privacidade depois. A política de canais futuros já exige entrega a todos os
+inscritos, embora canais ainda não façam parte da interface.
+
 ## Scripts
 
 ```bash

@@ -997,6 +997,28 @@ a {
   color: #60927d;
 }
 
+.message-ticks {
+  min-width: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #6f9184;
+}
+
+.message-ticks--sent {
+  min-width: 13px;
+  color: #769487;
+}
+
+.message-ticks--delivered {
+  color: #557f70;
+}
+
+.message-ticks--read {
+  color: #0b8d75;
+  filter: drop-shadow(0 1px 1px rgb(11 141 117 / 15%));
+}
+
 .sender-name {
   display: block;
   margin-bottom: 3px;

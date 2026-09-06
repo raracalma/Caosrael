@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { db } from "./db.js";
+import {
+  aggregateDeliveryStatus,
+  type DeliveryStatus,
+  type ReceiptAwareChatType,
+  type ReceiptProgress,
+} from "./delivery-policy.js";
 
 type UserRow = {
   id: string;
@@ -26,6 +32,8 @@ type MessageRow = {
   sender_name: string;
   body: string;
   created_at: string;
+  delivery_status: DeliveryStatus;
+  status_updated_at: string | null;
 };
 
 export type PublicUser = {
@@ -42,6 +50,18 @@ export type Message = {
   senderName: string;
   body: string;
   createdAt: string;
+  deliveryStatus: DeliveryStatus;
+  statusUpdatedAt: string;
+  receiptSummary: ReceiptProgress;
+};
+
+export type ReceiptUpdate = {
+  messageId: string;
+  chatId: string;
+  senderId: string;
+  deliveryStatus: DeliveryStatus;
+  statusUpdatedAt: string;
+  receiptSummary: ReceiptProgress;
 };
 
 export type ChatSummary = {
@@ -64,6 +84,7 @@ function mapUser(row: UserRow, onlineIds = new Set<string>()): PublicUser {
 }
 
 function mapMessage(row: MessageRow): Message {
+  const receipt = getReceiptUpdate(row.id);
   return {
     id: row.id,
     chatId: row.chat_id,
@@ -71,6 +92,81 @@ function mapMessage(row: MessageRow): Message {
     senderName: row.sender_name,
     body: row.body,
     createdAt: row.created_at,
+    deliveryStatus: receipt?.deliveryStatus ?? row.delivery_status,
+    statusUpdatedAt:
+      receipt?.statusUpdatedAt ?? row.status_updated_at ?? row.created_at,
+    receiptSummary: receipt?.receiptSummary ?? {
+      total: 0,
+      delivered: 0,
+      read: 0,
+      required: 1,
+    },
+  };
+}
+
+export function getReceiptUpdate(messageId: string): ReceiptUpdate | null {
+  const aggregate = db
+    .prepare(
+      `SELECT
+         m.id,
+         m.chat_id,
+         m.sender_id,
+         m.delivery_status,
+         m.created_at,
+         c.type AS chat_type,
+         COUNT(r.user_id) AS total,
+         COALESCE(SUM(
+           CASE WHEN r.status IN ('delivered', 'read') THEN 1 ELSE 0 END
+         ), 0) AS delivered,
+         COALESCE(SUM(
+           CASE WHEN r.status = 'read' THEN 1 ELSE 0 END
+         ), 0) AS read,
+         COALESCE(
+           MAX(COALESCE(r.read_at, r.delivered_at, r.sent_at)),
+           m.created_at
+         ) AS status_updated_at
+       FROM messages m
+       JOIN chats c ON c.id = m.chat_id
+       LEFT JOIN message_receipts r ON r.message_id = m.id
+       WHERE m.id = ?
+       GROUP BY m.id`,
+    )
+    .get(messageId) as
+    | {
+        id: string;
+        chat_id: string;
+        sender_id: string;
+        delivery_status: DeliveryStatus;
+        created_at: string;
+        chat_type: ReceiptAwareChatType;
+        total: number;
+        delivered: number;
+        read: number;
+        status_updated_at: string;
+      }
+    | undefined;
+
+  if (!aggregate) return null;
+  const { status, progress } = aggregateDeliveryStatus(aggregate.chat_type, {
+    total: aggregate.total,
+    delivered: aggregate.delivered,
+    read: aggregate.read,
+  });
+  if (status !== aggregate.delivery_status) {
+    db.prepare(
+      `UPDATE messages
+       SET delivery_status = ?, status_updated_at = ?
+       WHERE id = ?`,
+    ).run(status, aggregate.status_updated_at, aggregate.id);
+  }
+
+  return {
+    messageId: aggregate.id,
+    chatId: aggregate.chat_id,
+    senderId: aggregate.sender_id,
+    deliveryStatus: status,
+    statusUpdatedAt: aggregate.status_updated_at,
+    receiptSummary: progress,
   };
 }
 
@@ -299,7 +395,7 @@ export function createGroupChat(
 
 export function createMessage(chatId: string, senderId: string, body: string) {
   if (!isChatMember(chatId, senderId)) return null;
-  const message: Message = {
+  const message = {
     id: randomUUID(),
     chatId,
     senderId,
@@ -310,15 +406,31 @@ export function createMessage(chatId: string, senderId: string, body: string) {
   db.transaction(() => {
     db.prepare(
       `INSERT INTO messages
-        (id, chat_id, sender_id, body, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+        (
+          id,
+          chat_id,
+          sender_id,
+          body,
+          created_at,
+          delivery_status,
+          status_updated_at
+        )
+       VALUES (?, ?, ?, ?, ?, 'sent', ?)`,
     ).run(
       message.id,
       message.chatId,
       message.senderId,
       message.body,
       message.createdAt,
+      message.createdAt,
     );
+    db.prepare(
+      `INSERT INTO message_receipts
+        (message_id, user_id, status, sent_at)
+       SELECT ?, user_id, 'sent', ?
+       FROM chat_members
+       WHERE chat_id = ? AND user_id != ?`,
+    ).run(message.id, message.createdAt, chatId, senderId);
     db.prepare("UPDATE chats SET updated_at = ? WHERE id = ?").run(
       message.createdAt,
       chatId,
@@ -329,15 +441,116 @@ export function createMessage(chatId: string, senderId: string, body: string) {
        WHERE chat_id = ? AND user_id = ?`,
     ).run(message.createdAt, chatId, senderId);
   })();
-  return message;
+  const row = db
+    .prepare(
+      `SELECT m.*, u.display_name AS sender_name
+       FROM messages m
+       JOIN users u ON u.id = m.sender_id
+       WHERE m.id = ?`,
+    )
+    .get(message.id) as MessageRow;
+  return mapMessage(row);
+}
+
+export function markMessageDelivered(messageId: string, userId: string) {
+  const receipt = db
+    .prepare(
+      `SELECT status
+       FROM message_receipts
+       WHERE message_id = ? AND user_id = ?`,
+    )
+    .get(messageId, userId) as { status: DeliveryStatus } | undefined;
+  if (!receipt) return null;
+
+  if (receipt.status === "sent") {
+    const deliveredAt = new Date().toISOString();
+    db.prepare(
+      `UPDATE message_receipts
+       SET status = 'delivered', delivered_at = ?
+       WHERE message_id = ? AND user_id = ? AND status = 'sent'`,
+    ).run(deliveredAt, messageId, userId);
+  }
+  return getReceiptUpdate(messageId);
+}
+
+function markReceiptRowsDelivered(messageIds: string[], userId: string) {
+  if (!messageIds.length) return [];
+  const deliveredAt = new Date().toISOString();
+  const update = db.prepare(
+    `UPDATE message_receipts
+     SET status = 'delivered', delivered_at = ?
+     WHERE message_id = ? AND user_id = ? AND status = 'sent'`,
+  );
+  db.transaction(() => {
+    messageIds.forEach((messageId) =>
+      update.run(deliveredAt, messageId, userId),
+    );
+  })();
+  return messageIds
+    .map(getReceiptUpdate)
+    .filter((receipt): receipt is ReceiptUpdate => receipt !== null);
+}
+
+export function markPendingMessagesDelivered(userId: string) {
+  const rows = db
+    .prepare(
+      `SELECT message_id
+       FROM message_receipts
+       WHERE user_id = ? AND status = 'sent'`,
+    )
+    .all(userId) as Array<{ message_id: string }>;
+  return markReceiptRowsDelivered(
+    rows.map((row) => row.message_id),
+    userId,
+  );
+}
+
+export function markChatDelivered(chatId: string, userId: string) {
+  if (!isChatMember(chatId, userId)) return null;
+  const rows = db
+    .prepare(
+      `SELECT r.message_id
+       FROM message_receipts r
+       JOIN messages m ON m.id = r.message_id
+       WHERE m.chat_id = ? AND r.user_id = ? AND r.status = 'sent'`,
+    )
+    .all(chatId, userId) as Array<{ message_id: string }>;
+  return markReceiptRowsDelivered(
+    rows.map((row) => row.message_id),
+    userId,
+  );
 }
 
 export function markChatRead(chatId: string, userId: string) {
-  if (!isChatMember(chatId, userId)) return false;
-  db.prepare(
-    `UPDATE chat_members
-     SET last_read_at = ?
-     WHERE chat_id = ? AND user_id = ?`,
-  ).run(new Date().toISOString(), chatId, userId);
-  return true;
+  if (!isChatMember(chatId, userId)) return null;
+  const rows = db
+    .prepare(
+      `SELECT r.message_id
+       FROM message_receipts r
+       JOIN messages m ON m.id = r.message_id
+       WHERE m.chat_id = ? AND r.user_id = ? AND r.status != 'read'`,
+    )
+    .all(chatId, userId) as Array<{ message_id: string }>;
+  const readAt = new Date().toISOString();
+  const updateReceipt = db.prepare(
+    `UPDATE message_receipts
+     SET
+       status = 'read',
+       delivered_at = COALESCE(delivered_at, ?),
+       read_at = ?
+     WHERE message_id = ? AND user_id = ?`,
+  );
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE chat_members
+       SET last_read_at = ?
+       WHERE chat_id = ? AND user_id = ?`,
+    ).run(readAt, chatId, userId);
+    rows.forEach(({ message_id: messageId }) =>
+      updateReceipt.run(readAt, readAt, messageId, userId),
+    );
+  })();
+  return rows
+    .map(({ message_id: messageId }) => getReceiptUpdate(messageId))
+    .filter((receipt): receipt is ReceiptUpdate => receipt !== null);
 }
