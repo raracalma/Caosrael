@@ -1091,7 +1091,7 @@ function ChannelInviteModal({
   );
 }
 
-function EmptyConversation({ onNewChat }: { onNewChat: () => void }) {
+function EmptyConversation() {
   return (
     <section className="empty-conversation">
       <div className="empty-conversation__art">
@@ -1105,9 +1105,9 @@ function EmptyConversation({ onNewChat }: { onNewChat: () => void }) {
         Selecione uma conversa ao lado ou comece uma nova. O importante é
         aparecer por inteiro.
       </p>
-      <button className="button button--soft" onClick={onNewChat}>
-        <Plus size={18} /> Nova conversa
-      </button>
+      <span className="empty-conversation__hint">
+        Use o botão + na barra inferior para começar.
+      </span>
     </section>
   );
 }
@@ -1785,7 +1785,7 @@ function Messenger({
             )}
           </>
         ) : (
-          <EmptyConversation onNewChat={() => setShowNewChat(true)} />
+          <EmptyConversation />
         )}
       </section>
 
